@@ -10,5 +10,5 @@ type Client struct {
 	ctx     context.Context
 	conn    *rpc.Conn
 	rawConn net.Conn
-	api     capnp.API
+	//api     capnp.API
 }

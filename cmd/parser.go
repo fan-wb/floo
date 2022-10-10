@@ -52,7 +52,8 @@ func RunCmdline(args []string) int {
 				{
 					Name:    "add",
 					Aliases: []string{"a", "set"},
-					Action:  withArgCheck(needAtLeast(2), withDaemon(handleRemoteAdd, true)),
+					// Action:  withArgCheck(needAtLeast(2), withDaemon(handleRemoteAdd, true)),
+					Action: withArgCheck(needAtLeast(2), withDaemon(handleRemoteAdd, true)),
 				},
 			},
 		},
