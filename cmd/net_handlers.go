@@ -10,5 +10,7 @@ func handleWhoami() {
 }
 
 func handleRemoteAdd(ctx *cli.Context, ctl *client.Client) error {
+	// TODO
 
+	return nil
 }

@@ -12,3 +12,13 @@ type Client struct {
 	rawConn net.Conn
 	//api     capnp.API
 }
+
+func Dial(ctx context.Context, daemonURL string) (*Client, error) {
+	return &Client{
+		// TODO
+	}, nil
+}
+
+func (cl *Client) Close() error {
+	return cl.conn.Close()
+}
