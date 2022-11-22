@@ -61,10 +61,10 @@ func withDaemon(handler cmdHandlerWithClient, startNew bool) cli.ActionFunc {
 		}
 
 		// Check if the daemon is running already:
-		clt, err := client.Dial(context.Background(), daemonURL)
+		ctl, err := client.Dial(context.Background(), daemonURL)
 		if err == nil {
-			defer clt.Close()
-			return handler(ctx, clt)
+			defer ctl.Close()
+			return handler(ctx, ctl)
 		}
 
 		if !startNew {
@@ -83,7 +83,7 @@ func withDaemon(handler cmdHandlerWithClient, startNew bool) cli.ActionFunc {
 
 		logVerbose(ctx, "starting new daemon in background, on folder '%s'", folder)
 
-		clt, err = startDaemon(ctx, folder, daemonURL)
+		ctl, err = startDaemon(ctx, folder, daemonURL)
 		if err != nil {
 			return ExitCode{
 				DaemonNotResponding,
@@ -92,8 +92,8 @@ func withDaemon(handler cmdHandlerWithClient, startNew bool) cli.ActionFunc {
 		}
 
 		// Run the actual handler:
-		defer clt.Close()
-		return handler(ctx, clt)
+		defer ctl.Close()
+		return handler(ctx, ctl)
 	}
 }
 

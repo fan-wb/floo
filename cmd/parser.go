@@ -23,8 +23,8 @@ func RunCmdline(args []string) int {
 
 	// Groups:
 	repoGroup := formatGroup("repository")
-	wdirGroup := formatGroup("working tree")
-	vcscGroup := formatGroup("version control")
+	//wdirGroup := formatGroup("working tree")
+	//vcscGroup := formatGroup("version control")
 	netwGroup := formatGroup("network")
 
 	app.BashComplete = func(ctx *cli.Context) {
