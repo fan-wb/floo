@@ -31,7 +31,7 @@ type Database interface {
 	// Get retrieves `key` out of the bucket
 	Get(key ...string) ([]byte, error)
 
-	// Keys iterates all keys in the database in lexical order
+	// Keys iterates all keys in the database and return in lexical order
 	Keys(prefix ...string) ([][]string, error)
 
 	// Batch returns new Batch object
