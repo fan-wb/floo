@@ -1,10 +1,14 @@
 package db
 
 import (
+	"floo/util"
+	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // DiskDatabase is a database that uses a filesystem as storage
@@ -62,29 +66,114 @@ func (db *DiskDatabase) Put(val []byte, key ...string) {
 // Clear removes all keys below and including `key`
 func (db *DiskDatabase) Clear(key ...string) error {
 
-	return nil
+	// cache the real modification for later
+	db.ops = append(db.ops, func() error {
+		filePrefix := filepath.Join(db.basePath, fixDirectoryKeys(key))
+		walker := func(path string, info os.FileInfo, err error) error {
+			if os.IsNotExist(err) {
+				return nil
+			}
+
+			if err != nil {
+				return err
+			}
+
+			if !info.IsDir() {
+				return os.Remove(path)
+			}
+
+			return nil
+		}
+		return filepath.Walk(filePrefix, walker)
+	})
+
+	// make sure we also modify the currently cached objects
+	prefix := path.Join(key...)
+	for key := range db.cache {
+		if strings.HasPrefix(key, prefix) {
+			delete(db.cache, key)
+			db.deletes[key] = struct{}{}
+		}
+	}
+
+	// check what keys we actually need to delete
+	filePrefix := filepath.Join(db.basePath, fixDirectoryKeys(key))
+	walker := func(filePath string, info os.FileInfo, err error) error {
+		if os.IsNotExist(err) {
+			return nil
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() {
+			key := reverseDirectoryKeys(filePath[len(db.basePath):])
+			db.deletes[path.Join(key...)] = struct{}{}
+		}
+		return nil
+	}
+
+	return filepath.Walk(filePrefix, walker)
 }
 
 // Erase a `key` from database
 func (db *DiskDatabase) Erase(key ...string) {
 
+	db.ops = append(db.ops, func() error {
+		fullPath := filepath.Join(db.basePath, fixDirectoryKeys(key))
+		err := os.Remove(fullPath)
+		if os.IsNotExist(err) {
+			return ErrNoSuchKey
+		}
+
+		return err
+	})
+
+	fullKey := path.Join(key...)
+	db.deletes[fullKey] = struct{}{}
+	delete(db.cache, fullKey)
 }
 
 // Flush this batch to the database
 func (db *DiskDatabase) Flush() error {
+	db.refs--
+	if db.refs < 0 {
+		db.refs = 0
+	}
 
+	if db.refs > 0 {
+		return nil
+	}
+
+	// clear the cache first, if any of the next steps
+	// went wrong, at least we have the current state
+	db.cache = make(map[string][]byte)
+	db.deletes = make(map[string]struct{})
+
+	// make sure db.ops is nil, even if Flush failed
+	ops := db.ops
+	db.ops = nil
+
+	for _, op := range ops {
+		if err := op(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // Rollback will forget all the changes without executing them
 func (db *DiskDatabase) Rollback() {
-
+	db.refs = 0
+	db.ops = nil
+	db.cache = make(map[string][]byte)
+	db.deletes = make(map[string]struct{})
 }
 
 // HaveWrites return if the batch has something we can write to the disk with Flush()
 func (db *DiskDatabase) HaveWrites() bool {
-
-	return false
+	return len(db.ops) > 0
 }
 
 // Get a single `val` from bucket by `key`
@@ -137,6 +226,46 @@ func (db *DiskDatabase) Batch() Batch {
 	db.refs++
 	// DiskDatabase implements 'Batch'
 	return db
+}
+
+// Export writes all key/values into a gzipped tar which is written to `w`
+func (db *DiskDatabase) Export(w io.Writer) error {
+	archiveName := fmt.Sprintf("floometa-%s.gz", time.Now().Format(time.RFC3339))
+	return util.Tar(db.basePath, archiveName, w)
+}
+
+// Import reads a gzipped tar from `r` into current database
+func (db *DiskDatabase) Import(r io.Reader) error {
+	return util.Untar(r, db.basePath)
+}
+
+// Close the database
+func (db *DiskDatabase) Close() error {
+	return nil
+}
+
+// Glob finds all existing keys in the store, starting with `prefix`
+func (db *DiskDatabase) Glob(prefix []string) ([][]string, error) {
+	fullPrefix := filepath.Join(db.basePath, filepath.Join(prefix...))
+	matches, err := filepath.Glob(fullPrefix + "*")
+	if err != nil {
+		return nil, err
+	}
+
+	results := [][]string{}
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			key := match[len(db.basePath)+1:]
+			if _, ok := db.deletes[key]; !ok {
+				results = append(results, strings.Split(key, string(filepath.Separator)))
+			}
+		}
+	}
+	return results, nil
 }
 
 func reverseDirectoryKeys(key string) []string {

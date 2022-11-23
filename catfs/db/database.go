@@ -48,7 +48,7 @@ type Database interface {
 	// Close a database
 	Close() error
 
-	// Glob finds all existing keys in the store starts with `prefix`
+	// Glob finds all existing keys in the store, starting with `prefix`
 	Glob(prefix string) ([][]string, error)
 }
 
