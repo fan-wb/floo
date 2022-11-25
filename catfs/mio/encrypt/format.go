@@ -24,8 +24,10 @@ The size of the MAC depends on the algorithm, for poly1305 it is 16 bytes
 package encrypt
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"encoding/binary"
+	"errors"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -125,4 +127,114 @@ func GenerateHeader(key []byte, maxBlockSize int64, flags Flags) []byte {
 	copy(header[headerSize-macSize:headerSize], shortHeaderMac)
 
 	return header
+}
+
+// HeaderInfo represents a parsed header.
+type HeaderInfo struct {
+	// Version of the file format. Currently, it's always 1.
+	Version uint16
+
+	// Cipher type used in the file.
+	CipherBit Flags
+
+	// KeyLen is the number of bytes in the encryption key.
+	KeyLen uint32
+
+	// BlockLen is the max. number of bytes in a block.
+	// The last block may be smaller.
+	BlockLen uint32
+
+	// Flags control the encryption algorithm and other things.
+	Flags Flags
+}
+
+var (
+	// ErrSmallHeader is returned when the header is too small to parse.
+	// Usually happens when trying to decrypt a raw stream.
+	ErrSmallHeader = errors.New("header is too small")
+
+	// ErrBadMagic is returned when the stream does not start with the magic number.
+	// Usually happens when trying to decrypt a raw or compressed stream.
+	ErrBadMagic = errors.New("magic number missing")
+
+	// ErrBadFlags means that you passed an invalid flags combination
+	// or the stream was modified to have wrong flags.
+	ErrBadFlags = errors.New("inconsistent header flags")
+
+	// ErrBadHeaderMAC means that the header is not what the writer originally
+	// put into the stream. Usually means somebody or something changed it.
+	ErrBadHeaderMAC = errors.New("header mac differs from expected")
+)
+
+// ParseHeader parses the header of the format file
+// returns the flags, key and block length.
+func ParseHeader(header, key []byte) (*HeaderInfo, error) {
+	if len(header) < len(MagicNumber) {
+		return nil, ErrSmallHeader
+	}
+
+	if bytes.Compare(header[:len(MagicNumber)], MagicNumber) != 0 {
+		return nil, ErrBadMagic
+	}
+
+	if len(header) < headerSize {
+		return nil, ErrSmallHeader
+	}
+
+	flags := Flags(binary.LittleEndian.Uint32(header[8:12]))
+	keyLen := binary.LittleEndian.Uint32(header[12:16])
+	blockLen := binary.LittleEndian.Uint32(header[16:20])
+
+	cipherBit, err := cipherTypeBitFromFlags(flags)
+	if err != nil {
+		return nil, err
+	}
+
+	// check the header MAC
+	headerMac := hmac.New(sha3.New224, key)
+	if _, err := headerMac.Write(header[:headerSize-macSize]); err != nil {
+		return nil, err
+	}
+
+	shortHeaderMac := headerMac.Sum(nil)[:macSize]
+	storedMac := header[headerSize-macSize : headerSize]
+	if !hmac.Equal(shortHeaderMac, storedMac) {
+		return nil, ErrBadHeaderMAC
+	}
+
+	return &HeaderInfo{
+		Version:   version,
+		CipherBit: cipherBit,
+		KeyLen:    keyLen,
+		BlockLen:  blockLen,
+		Flags:     flags,
+	}, nil
+}
+
+func cipherTypeBitFromFlags(flags Flags) (Flags, error) {
+	var cipherBit Flags
+	var bits = []Flags{
+		FlagEncryptAES256GCM,
+		FlagEncryptChaCha20,
+	}
+
+	for _, bit := range bits {
+		if flags&bit == 0 {
+			continue
+		}
+
+		if cipherBit != 0 {
+			// only one bit at the same time allowed.
+			return 0, ErrBadFlags
+		}
+
+		cipherBit = bit
+	}
+
+	if cipherBit == 0 {
+		// no algorithm set: also error out.
+		return 0, ErrBadFlags
+	}
+
+	return cipherBit, nil
 }
