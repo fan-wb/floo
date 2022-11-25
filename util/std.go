@@ -605,7 +605,7 @@ func URLToSchemeAndAddr(s string) (string, string, error) {
 		}
 
 		// We can optionally specify an ID. That can be useful to
-		// distinguish between different brig daemon on the same system.
+		// distinguish between different floo daemon on the same system.
 		// (needed for the test-bed script for example)
 		if id := v.Get("id"); id != "" {
 			u.Path += id
