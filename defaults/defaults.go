@@ -15,7 +15,7 @@ var Defaults = DefaultsV0
 
 // OpenMigratedConfig takes the config.yml at path and loads it.
 // If required, it also migrates the config structure to the newest
-// version - brig can always rely on the latest config keys to be present.
+// version - floo can always rely on the latest config keys to be present.
 func OpenMigratedConfig(path string) (*config.Config, error) {
 	fd, err := os.Open(path) // #nosec
 	if err != nil {

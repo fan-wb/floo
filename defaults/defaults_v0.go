@@ -19,7 +19,7 @@ func DaemonDefaultURL() string {
 		// (other tools use unix:@/path, but Go does not support that notation)
 		// This also means that there are no user rights on the socket file.
 		// If you need this, specify the url in the config.
-		return "unix:/tmp/brig.socket?abstract=true"
+		return "unix:/tmp/floo.socket?abstract=true"
 	default:
 		return "tcp://127.0.0.1:6666"
 	}

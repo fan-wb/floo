@@ -7,9 +7,9 @@ file format look like this:
 
 HEADER is 36 bytes big, contains following fields:
 	-	8-byte: Magic Number (to identify non-floo files quickly)
-	-	4-byte: Flags (describe the stream)
-	-	2-byte: Key length in bytes
-	-	2-byte: Reserved
+	-	2-Byte: Format version
+    -   2-Byte: Used cipher type (ChaCha20 or AES-GCM currently)
+	-	4-byte: Key length in bytes
 	-	4-byte: Block size (the last one may be smaller)
 	-  16-byte: MAC (protect the header from forgery)
 
@@ -19,45 +19,30 @@ BLOCKHEADER is 8 bytes big,  contains following fields:
 PAYLOAD contains the actual encrypted data, including a MAC at the end
 The size of the MAC depends on the algorithm, for poly1305 it is 16 bytes
 
+All header metadata is encoded in little endian.
+
+Reader/Writer are capable or reading/writing this format.  Additionally,
+Reader supports efficient seeking into the encrypted data, provided the
+underlying datastream supports seeking.  SEEK_END is only supported when the
+number of encrypted blocks is present in the header.
 */
 
 package encrypt
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"encoding/binary"
-	"errors"
+	"fmt"
+	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/sha3"
 )
 
-type Flags int32
-
-// possible ciphers in Counter mode
 const (
-	// FlagEmpty is invalid
-	FlagEmpty = Flags(0)
-
-	// FlagEncryptAES256GCM indicates the stream was encrypted with AES256 in GCM mode.
-	// This should be fast on modern CPUs.
-	FlagEncryptAES256GCM = Flags(1) << iota
-
-	// FlagEncryptChaCha20 indicates that the stream was encrypted with ChaCha20.
-	// This can be a good choice if your CPU does not support the AES-NI instruction set.
-	FlagEncryptChaCha20
-
-	// reserve some flags for more encryption types.
-	// no particular reason, just want to have enc-type flags to be in line.
-	flagReserved1
-	flagReserved2
-	flagReserved3
-	flagReserved4
-	flagReserved5
-	flagReserved6
-
-	// FlagCompressedInside indicates that the encrypted data was also compressed.
-	// This can be used to decide at runtime what streaming is needed.
-	FlagCompressedInside
+	aeadCipherChaCha = iota
+	aeadCipherAES
 )
 
 // Other constants:
@@ -71,6 +56,9 @@ const (
 	// Size of the initial header:
 	headerSize = 20 + macSize
 
+	// Chacha20 appears to be twice as fast as AES-GCM on my machine
+	defaultCipherType = aeadCipherAES
+
 	// Default maxBlockSize if not set
 	defaultMaxBlockSize = 64 * 1024
 
@@ -80,21 +68,26 @@ const (
 
 var (
 	// MagicNumber contains the first 8 byte of every floo header.
-	// It is the ascii string "evanesco".
+	// It is the ASCII string "evanesco" -- the Vanishing Spell.
 	MagicNumber = []byte{
 		0x65, 0x76, 0x61, 0x6e,
 		0x65, 0x73, 0x63, 0x6f,
 	}
 )
 
+// KeySize of the used cipher's key in bytes.
+var KeySize = chacha20poly1305.KeySize
+
 // GenerateHeader generates a valid header for the format file
-func GenerateHeader(key []byte, maxBlockSize int64, flags Flags) []byte {
+func GenerateHeader(key []byte, maxBlockSize int64, cipher uint16) []byte {
 	// This is in big endian:
 	header := []byte{
-		// Magic number (8 Byte):
+		// floo's magic number (8 Byte):
 		0, 0, 0, 0, 0, 0, 0, 0,
-		// Flags (4 byte):
-		0, 0, 0, 0,
+		// File format version (2 Byte):
+		0, 0,
+		// Cipher type (2 Byte):
+		0, 0,
 		// Key length (4 Byte):
 		0, 0, 0, 0,
 		// Block length (4 Byte):
@@ -107,12 +100,11 @@ func GenerateHeader(key []byte, maxBlockSize int64, flags Flags) []byte {
 	// Magic number
 	copy(header[:len(MagicNumber)], MagicNumber)
 
-	// Flags
-	binary.LittleEndian.PutUint32(header[8:12], uint32(flags))
+	binary.LittleEndian.PutUint32(header[8:10], version)
 
-	// Encode key size
-	binary.LittleEndian.PutUint32(header[12:16], uint32(32))
-
+	binary.LittleEndian.PutUint16(header[10:12], cipher)
+	// Encode key size:
+	binary.LittleEndian.PutUint32(header[12:16], uint32(KeySize))
 	// Encode max block size
 	binary.LittleEndian.PutUint32(header[16:20], uint32(maxBlockSize))
 
@@ -135,60 +127,34 @@ type HeaderInfo struct {
 	Version uint16
 
 	// Cipher type used in the file.
-	CipherBit Flags
+	Cipher uint16
 
-	// KeyLen is the number of bytes in the encryption key.
-	KeyLen uint32
+	// Keylen is the number of bytes in the encryption key.
+	Keylen uint32
 
-	// BlockLen is the max. number of bytes in a block.
+	// Blocklen is the max number of bytes in a block.
 	// The last block may be smaller.
-	BlockLen uint32
-
-	// Flags control the encryption algorithm and other things.
-	Flags Flags
+	Blocklen uint32
 }
-
-var (
-	// ErrSmallHeader is returned when the header is too small to parse.
-	// Usually happens when trying to decrypt a raw stream.
-	ErrSmallHeader = errors.New("header is too small")
-
-	// ErrBadMagic is returned when the stream does not start with the magic number.
-	// Usually happens when trying to decrypt a raw or compressed stream.
-	ErrBadMagic = errors.New("magic number missing")
-
-	// ErrBadFlags means that you passed an invalid flags combination
-	// or the stream was modified to have wrong flags.
-	ErrBadFlags = errors.New("inconsistent header flags")
-
-	// ErrBadHeaderMAC means that the header is not what the writer originally
-	// put into the stream. Usually means somebody or something changed it.
-	ErrBadHeaderMAC = errors.New("header mac differs from expected")
-)
 
 // ParseHeader parses the header of the format file
 // returns the flags, key and block length.
 func ParseHeader(header, key []byte) (*HeaderInfo, error) {
-	if len(header) < len(MagicNumber) {
-		return nil, ErrSmallHeader
-	}
-
 	if bytes.Compare(header[:len(MagicNumber)], MagicNumber) != 0 {
-		return nil, ErrBadMagic
+		return nil, fmt.Errorf("magic number in header differs")
 	}
 
-	if len(header) < headerSize {
-		return nil, ErrSmallHeader
+	version := binary.LittleEndian.Uint16(header[8:10])
+	cipherType := binary.LittleEndian.Uint16(header[10:12])
+	switch cipherType {
+	case aeadCipherAES:
+	case aeadCipherChaCha:
+		// we support this!
+	default:
+		return nil, fmt.Errorf("unknown cipher type: %d", cipherType)
 	}
-
-	flags := Flags(binary.LittleEndian.Uint32(header[8:12]))
-	keyLen := binary.LittleEndian.Uint32(header[12:16])
-	blockLen := binary.LittleEndian.Uint32(header[16:20])
-
-	cipherBit, err := cipherTypeBitFromFlags(flags)
-	if err != nil {
-		return nil, err
-	}
+	keylen := binary.LittleEndian.Uint32(header[12:16])
+	blocklen := binary.LittleEndian.Uint32(header[16:20])
 
 	// check the header MAC
 	headerMac := hmac.New(sha3.New224, key)
@@ -199,42 +165,47 @@ func ParseHeader(header, key []byte) (*HeaderInfo, error) {
 	shortHeaderMac := headerMac.Sum(nil)[:macSize]
 	storedMac := header[headerSize-macSize : headerSize]
 	if !hmac.Equal(shortHeaderMac, storedMac) {
-		return nil, ErrBadHeaderMAC
+		return nil, fmt.Errorf("header MAC differs from expected")
 	}
 
 	return &HeaderInfo{
-		Version:   version,
-		CipherBit: cipherBit,
-		KeyLen:    keyLen,
-		BlockLen:  blockLen,
-		Flags:     flags,
+		Version:  version,
+		Cipher:   cipherType,
+		Keylen:   keylen,
+		Blocklen: blocklen,
 	}, nil
 }
 
-func cipherTypeBitFromFlags(flags Flags) (Flags, error) {
-	var cipherBit Flags
-	var bits = []Flags{
-		FlagEncryptAES256GCM,
-		FlagEncryptChaCha20,
-	}
+/*
+	Common Utilities
+*/
 
-	for _, bit := range bits {
-		if flags&bit == 0 {
-			continue
+type aeadCommon struct {
+	// Nonce that form the first aead.NonceSize() bytes of the output
+	nonce []byte
+
+	// Key used for encryption/decryption
+	key []byte
+
+	// For more information, see:
+	// https://en.wikipedia.org/wiki/Authenticated_encryption
+	aead cipher.AEAD
+
+	// Buffer for encrypted data (maxBlockSize + overhead)
+	encBuf []byte
+}
+
+func createAEADWorker(cipherType uint16, key []byte) (cipher.AEAD, error) {
+	switch cipherType {
+	case aeadCipherAES:
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			return nil, err
 		}
-
-		if cipherBit != 0 {
-			// only one bit at the same time allowed.
-			return 0, ErrBadFlags
-		}
-
-		cipherBit = bit
+		return cipher.NewGCM(block)
+	case aeadCipherChaCha:
+		return chacha20poly1305.New(key)
 	}
 
-	if cipherBit == 0 {
-		// no algorithm set: also error out.
-		return 0, ErrBadFlags
-	}
-
-	return cipherBit, nil
+	return nil, fmt.Errorf("no such cipher type: %d", cipherType)
 }
