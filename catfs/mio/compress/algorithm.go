@@ -27,6 +27,18 @@ var (
 		AlgoSnappy: snappyAlgo{},
 		AlgoLZ4:    lz4Algo{},
 	}
+
+	algoToString = map[AlgorithmType]string{
+		AlgoNone:   "none",
+		AlgoSnappy: "snappy",
+		AlgoLZ4:    "lz4",
+	}
+
+	stringToAlgo = map[string]AlgorithmType{
+		"none":   AlgoNone,
+		"snappy": AlgoSnappy,
+		"lz4":    AlgoLZ4,
+	}
 )
 
 // AlgoNone
@@ -63,4 +75,22 @@ func AlgorithmFromType(a AlgorithmType) (Algorithm, error) {
 		return algo, nil
 	}
 	return nil, ErrBadAlgo
+}
+
+// AlgoToString converts a algorithm type to a string.
+func AlgoToString(a AlgorithmType) string {
+	algo, ok := algoToString[a]
+	if !ok {
+		return "unknown algorithm"
+	}
+	return algo
+}
+
+// AlgoFromString tries to convert a string to AlgorithmType
+func AlgoFromString(s string) (AlgorithmType, error) {
+	algoType, ok := stringToAlgo[s]
+	if !ok {
+		return 0, errors.New("Invalid algorithm name")
+	}
+	return algoType, nil
 }

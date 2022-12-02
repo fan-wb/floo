@@ -34,3 +34,7 @@ type Writer struct {
 	// Becomes true after the first write.
 	headerWritten bool
 }
+
+func (w *Writer) Write(p []byte) (n int, err error) {
+
+}

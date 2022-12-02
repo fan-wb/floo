@@ -182,7 +182,68 @@ func (r *Reader) parseTrailerIfNeeded() error {
 	r.zipSeekOffset = headerSize
 	r.rawSeekOffset = 0
 	return nil
+}
 
+// Read reads len(p) bytes from the compressed stream into p.
+func (r *Reader) Read(p []byte) (int, error) {
+	if err := r.parseTrailerIfNeeded(); err != nil {
+		return 0, nil
+	}
+
+	// handle stream using compression
+	read := 0
+	for {
+		if r.chunkBuf.Len() != 0 {
+			n, err := r.chunkBuf.Read(p)
+			if err != nil {
+				return 0, err
+			}
+
+			r.rawSeekOffset += int64(n)
+			read += n
+			p = p[n:]
+		}
+		if len(p) == 0 {
+			break
+		}
+
+		if _, err := r.readZipChunk(); err != nil {
+			return read, err
+		}
+	}
+	return read, nil
+}
+
+// WriteTo implements io.WriterTo
+func (r *Reader) WriteTo(w io.Writer) (int64, error) {
+	if err := r.parseTrailerIfNeeded(); err != nil {
+		return 0, err
+	}
+
+	written := int64(0)
+
+	n, cerr := io.Copy(w, r.chunkBuf)
+	if cerr != nil {
+		return n, cerr
+	}
+	written += n
+	for {
+		decData, rerr := r.readZipChunk()
+		if rerr == io.EOF {
+			return written, nil
+		}
+
+		if rerr != nil {
+			return written, rerr
+		}
+
+		n, werr := w.Write(decData)
+		written += int64(n)
+
+		if werr != nil {
+			return written, werr
+		}
+	}
 }
 
 func (r *Reader) fixZipChunk() (int64, error) {
