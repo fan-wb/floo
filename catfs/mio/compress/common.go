@@ -139,3 +139,35 @@ func readHeader(bHeader []byte) (*header, error) {
 		version: version,
 	}, nil
 }
+
+// Pack compresses `data` with `algo` and returns the resulting data.
+// This is a convinience method meant to be used for small data packages.
+func Pack(data []byte, algo AlgorithmType) ([]byte, error) {
+	zipBuf := &bytes.Buffer{}
+	zipW, err := NewWriter(zipBuf, algo)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := zipW.ReadFrom(bytes.NewReader(data)); err != nil {
+		return nil, err
+	}
+
+	if err := zipW.Close(); err != nil {
+		return nil, err
+	}
+
+	return zipBuf.Bytes(), nil
+}
+
+// Unpack unpacks `data` and returns the decompressed data.
+// The algorithm is read from the data itself.
+// This is a convinience method meant to be used for small data packages.
+func Unpack(data []byte) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	if _, err := NewReader(bytes.NewReader(data)).WriteTo(buf); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}

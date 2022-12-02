@@ -15,7 +15,7 @@ type Reader struct {
 	// Index with records which contain chunk offsets.
 	index []record
 
-	// Buffer holds currently read (decoded) data; maxChunkSize.
+	// Buffer holds currently read data; maxChunkSize.
 	chunkBuf *chunkbuf.ChunkBuffer
 
 	// Structure with parsed trailer.
