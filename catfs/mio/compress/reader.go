@@ -293,6 +293,9 @@ func (r *Reader) readZipChunk() ([]byte, error) {
 	return decData, nil
 }
 
+// NewReader returns a new ReadSeeker with compression support.
+// As random access is the purpose of this layer, a ReadSeeker is required as parameter.
+// The used compression algorithm is chosen based on header information.
 func NewReader(r io.ReadSeeker) *Reader {
 	return &Reader{
 		zipR:      r,
