@@ -100,7 +100,7 @@ func GenerateHeader(key []byte, maxBlockSize int64, cipher uint16) []byte {
 	// Magic number
 	copy(header[:len(MagicNumber)], MagicNumber)
 
-	binary.LittleEndian.PutUint32(header[8:10], version)
+	binary.LittleEndian.PutUint16(header[8:10], version)
 
 	binary.LittleEndian.PutUint16(header[10:12], cipher)
 	// Encode key size:

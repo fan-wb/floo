@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"fmt"
 	"io"
 	"sort"
 )
@@ -206,4 +207,182 @@ func NewLayer(r io.ReadSeeker) *Layer {
 // SetSize sets the size of the absolute layer.
 func (l *Layer) SetSize(size int64) {
 	l.fileSize = size
+}
+
+// Write caches the buffer in memory or on disk until the file is closed.
+// If the file was truncated before, the truncate limit is raised again
+// if the write operation extended the limit.
+func (l *Layer) Write(buf []byte) (int, error) {
+	// Copy the buffer, since we cannot rely on it being valid forever.
+	modBuf := make([]byte, len(buf))
+	copy(modBuf, buf)
+
+	l.index.Add(&Modification{l.pos, modBuf})
+	l.pos += int64(len(buf))
+	if l.limit >= 0 && l.pos > l.limit {
+		l.limit = l.pos
+	}
+
+	return len(buf), nil
+}
+
+// Read will read from the underlying stream and overlay with the relevant
+// write chunks on its way, possibly extending the underlying stream.
+func (l *Layer) Read(buf []byte) (int, error) {
+	// Check for the truncation limit:
+	if l.limit >= 0 {
+		truncateDiff := l.limit - l.pos
+
+		// Seems we're over the limit:
+		if truncateDiff <= 0 {
+			return 0, io.EOF
+		}
+
+		// Truncate buf, so we don't read too much:
+		if truncateDiff < int64(len(buf)) {
+			buf = buf[:truncateDiff]
+		}
+	}
+
+	// See what writes are overlaying with our current position.
+	overlays := l.index.Overlays(l.pos, l.pos+int64(len(buf)))
+
+	// Only read from source if our writes do not fully occlude the underlying stream.
+	// We could also read only the not occluded parts, but that is more complex logic,
+	// and we kinda rely on the caller to have small buf sizes anyway.
+	n := len(buf)
+	var err error
+
+	if hasGaps(overlays, l.pos, l.pos+int64(len(buf))) {
+		n, err = l.r.Read(buf)
+		if err == io.EOF && l.pos < l.index.Max {
+			// There's only extending writes left.
+			// Empty `buf` so caller gets defined results.
+			// This should not happen in practice, but helps to identify bugs.
+			for i := n; i < len(buf); i++ {
+				buf[i] = byte(0)
+			}
+
+			// Forget about EOF for a short moment.
+			err = nil
+		}
+
+		// Check for other errors:
+		if err != nil {
+			return n, err
+		}
+	}
+
+	// Check which write chunks are overlaying this buf:
+	for _, chunk := range overlays {
+		// Tip: Drawing this on paper helps to understand the following.
+		mod := chunk.(*Modification)
+
+		// Overlapping area in absolute offsets:
+		lo, hi := mod.Range()
+		a, b := max(lo, l.pos), min(hi, l.pos+int64(len(buf)))
+
+		// Convert to relative offsets:
+		overlap, chunkLo, bufLo := int64(b-a), int64(a-lo), int64(a-l.pos)
+
+		// Copy overlapping data:
+		copy(buf[bufLo:bufLo+overlap], mod.data[chunkLo:chunkLo+overlap])
+
+		// Extend, if write chunks go over original data stream:
+		// (caller wants max. offset where we wrote data to buf)
+		if bufLo+overlap > int64(n) {
+			n = int(bufLo + overlap)
+		}
+	}
+
+	l.pos += int64(n)
+	return n, nil
+
+}
+
+// hasGaps checks if overlays occludes all bytes between `start` and `end`
+func hasGaps(overlays []Interval, start, end int64) bool {
+	diff := end - start
+
+	for _, chunk := range overlays {
+		lo, hi := chunk.Range()
+		diff -= min(hi, end) - max(lo, start)
+		if diff <= 0 {
+			return false
+		}
+	}
+
+	return diff > 0
+}
+
+// Seek remembers the new position and delegates the seek down.
+// Note: if the file was truncated before, a seek after the limit
+//
+//	will extend the truncation again and NOT return io.EOF.
+//	This might be surprising, but is convenient for first
+//	truncating to zero and then writing to the file.
+func (l *Layer) Seek(offset int64, whence int) (int64, error) {
+	newPos := l.pos
+
+	switch whence {
+	case io.SeekCurrent:
+		newPos += offset
+	case io.SeekStart:
+		newPos = offset
+	case io.SeekEnd:
+		if l.fileSize < 0 {
+			return 0, fmt.Errorf("layer: SEEK_END not supported without file size")
+		}
+
+		newPos = l.fileSize + offset
+	}
+
+	// Check if we hit the truncate limit:
+	if l.limit >= 0 && l.limit < newPos {
+		l.limit = newPos
+	}
+
+	l.pos = newPos
+
+	// Silence EOF:
+	if _, err := l.r.Seek(offset, whence); err != nil && err != io.EOF {
+		return 0, err
+	}
+
+	return l.pos, nil
+}
+
+// Close tries to close the underlying stream (if supported).
+func (l *Layer) Close() error {
+	if closer, ok := l.r.(io.Closer); ok {
+		return closer.Close()
+	}
+
+	return nil
+}
+
+// Truncate cuts off the stream at `size` bytes.
+// After hitting the limit, io.EOF is returned.
+// A value < 0 disables truncation.
+func (l *Layer) Truncate(size int64) {
+	l.limit = size
+	if l.limit < l.fileSize {
+		l.fileSize = size
+	}
+}
+
+// Limit returns the current truncation limit
+// or a number < 0 if no truncation is done.
+func (l *Layer) Limit() int64 {
+	return l.limit
+}
+
+// MinSize returns the minimum size that the layer will have.
+// Underlying stream might be larger, so caller needs to check that.
+func (l *Layer) MinSize() int64 {
+	if l.limit < 0 || l.index.Max < l.limit {
+		return int64(l.index.Max)
+	}
+
+	return int64(l.limit)
 }
