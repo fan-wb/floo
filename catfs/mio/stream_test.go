@@ -5,6 +5,7 @@ import (
 	"floo/catfs/mio/compress"
 	"floo/util/testutil"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"io"
 	"testing"
 )
@@ -92,4 +93,79 @@ func TestWriteAndRead(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestLimitedStream(t *testing.T) {
+	t.Parallel()
+
+	testData := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+
+	r := bytes.NewReader(testData)
+
+	// Fake a stream without all the encryption/compression fuzz.
+	stream := struct {
+		io.Reader
+		io.Seeker
+		io.Closer
+		io.WriterTo
+	}{
+		Reader:   r,
+		Seeker:   r,
+		WriterTo: r,
+		Closer:   io.NopCloser(r),
+	}
+
+	for idx := 0; idx <= 10; idx++ {
+		// Seek back to beginning:
+		_, err := stream.Seek(0, io.SeekStart)
+		require.Nil(t, err)
+
+		smallStream := LimitStream(stream, uint64(idx))
+		data, err := io.ReadAll(smallStream)
+		require.Nil(t, err)
+		require.Equal(t, testData[:idx], data)
+	}
+
+	var err error
+
+	// Reset and do some special torturing:
+	_, err = stream.Seek(0, io.SeekStart)
+	require.Nil(t, err)
+
+	limitStream := LimitStream(stream, 5)
+
+	n, err := limitStream.Seek(4, io.SeekStart)
+	require.Nil(t, err)
+	require.Equal(t, int64(4), n)
+
+	n, err = limitStream.Seek(6, io.SeekStart)
+	require.True(t, err == io.EOF)
+
+	n, err = limitStream.Seek(-5, io.SeekEnd)
+	require.Nil(t, err)
+	require.Equal(t, int64(0), n)
+
+	_, err = limitStream.Seek(-6, io.SeekEnd)
+	require.True(t, err == io.EOF)
+
+	_, err = stream.Seek(0, io.SeekStart)
+	require.Nil(t, err)
+
+	limitStream = LimitStream(stream, 5)
+
+	buf := &bytes.Buffer{}
+	n, err = limitStream.WriteTo(buf)
+	require.Nil(t, err)
+	require.Equal(t, n, int64(10))
+	require.Equal(t, buf.Bytes(), testData[:5])
+
+	buf.Reset()
+	_, err = stream.Seek(0, io.SeekStart)
+	require.Nil(t, err)
+	limitStream = LimitStream(stream, 11)
+
+	n, err = limitStream.WriteTo(buf)
+	require.Nil(t, err)
+	require.Equal(t, n, int64(10))
+	require.Equal(t, buf.Bytes(), testData)
 }
