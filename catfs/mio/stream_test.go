@@ -169,3 +169,65 @@ func TestLimitedStream(t *testing.T) {
 	require.Equal(t, n, int64(10))
 	require.Equal(t, buf.Bytes(), testData)
 }
+
+func TestLimitedStreamSize(t *testing.T) {
+	data := testutil.CreateDummyBuf(6041)
+	packData, err := compress.Pack(data, compress.AlgoSnappy)
+	require.Nil(t, err)
+
+	rZip := compress.NewReader(bytes.NewReader(packData))
+	stream := struct {
+		io.Reader
+		io.WriterTo
+		io.Seeker
+		io.Closer
+	}{
+		Reader:   rZip,
+		WriterTo: rZip,
+		Seeker:   rZip,
+		Closer:   io.NopCloser(rZip),
+	}
+
+	r := LimitStream(stream, uint64(len(data)))
+
+	size, err := r.Seek(0, io.SeekEnd)
+	require.Nil(t, err)
+	require.Equal(t, int64(len(data)), size)
+
+	off, err := r.Seek(0, io.SeekStart)
+	require.Nil(t, err)
+	require.Equal(t, int64(0), off)
+
+	buf := &bytes.Buffer{}
+	n, err := io.Copy(buf, r)
+	require.Nil(t, err)
+	require.Equal(t, int64(len(data)), n)
+	require.Equal(t, data, buf.Bytes())
+}
+
+func TestStreamSizeBySeek(t *testing.T) {
+	buf := &bytes.Buffer{}
+	data := testutil.CreateDummyBuf(6041 * 1024)
+	encStream, err := NewInStream(bytes.NewReader(data), TestKey, compress.AlgoSnappy)
+	require.Nil(t, err)
+
+	_, err = io.Copy(buf, encStream)
+	require.Nil(t, err)
+
+	stream, err := NewOutStream(bytes.NewReader(buf.Bytes()), TestKey)
+	require.Nil(t, err)
+
+	n, err := stream.Seek(0, io.SeekEnd)
+	require.Nil(t, err)
+	require.Equal(t, int64(len(data)), n)
+
+	n, err = stream.Seek(0, io.SeekStart)
+	require.Nil(t, err)
+	require.Equal(t, int64(0), n)
+
+	outBuf := &bytes.Buffer{}
+	n, err = io.Copy(outBuf, stream)
+	require.Nil(t, err)
+	require.Equal(t, int64(len(data)), n)
+	require.Equal(t, outBuf.Bytes(), data)
+}
