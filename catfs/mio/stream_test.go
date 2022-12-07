@@ -231,3 +231,5 @@ func TestStreamSizeBySeek(t *testing.T) {
 	require.Equal(t, int64(len(data)), n)
 	require.Equal(t, outBuf.Bytes(), data)
 }
+
+// TODO: Benchmark
