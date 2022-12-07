@@ -3,12 +3,12 @@ package nodes
 import (
 	"time"
 
+	capnp "capnproto.org/go/capnp/v3"
 	capnp_model "floo/catfs/nodes/capnp"
 	h "floo/util/hashlib"
-	capnp "zombiezen.com/go/capnproto2"
 )
 
-// NodeType defines the type of a specific node.
+// NodeType defines the type of specific node.
 type NodeType uint8
 
 const (
@@ -58,10 +58,10 @@ type Metadatable interface {
 	// Path of this node.
 	Path() string
 
-	// GetType returns the type of the node.
+	// Type returns the type of the node.
 	Type() NodeType
 
-	// INode shall return a unique identifier for this node that does
+	// Inode shall return a unique identifier for this node that does
 	// not change, even when the content of the node changes.
 	Inode() uint64
 
@@ -113,7 +113,7 @@ type Streamable interface {
 	Key() []byte
 }
 
-// Node is a single node in brig's MDAG.
+// Node is a single node in floo's MDAG.
 // It is currently either a Commit, a File or a Directory.
 type Node interface {
 	Metadatable
@@ -130,7 +130,7 @@ type ModNode interface {
 	// SetSize sets the size of the node in bytes
 	SetSize(size uint64)
 
-	// SetModTime updates the modtime timestamp
+	// SetModTime updates the mod time timestamp
 	SetModTime(modTime time.Time)
 
 	// SetName sets the user that last modified the file

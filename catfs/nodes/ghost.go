@@ -11,3 +11,8 @@ type Ghost struct {
 	ghostInode uint64
 	oldType    NodeType
 }
+
+// SetGhostPath sets the path of the ghost.
+func (g *Ghost) SetGhostPath(newPath string) {
+	g.ghostPath = newPath
+}

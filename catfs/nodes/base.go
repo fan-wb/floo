@@ -2,8 +2,9 @@ package nodes
 
 import (
 	capnp_model "floo/catfs/nodes/capnp"
+	h "floo/util/hashlib"
 	"fmt"
-	h "github.com/sahib/brig/util/hashlib"
+	"strings"
 	"time"
 )
 
@@ -33,6 +34,62 @@ type Base struct {
 
 	// Unique identifier for this node
 	inode uint64
+}
+
+// copyBase will copy all attributes from the base.
+func (b *Base) copyBase(inode uint64) Base {
+	return Base{
+		name:     b.name,
+		user:     b.user,
+		tree:     b.tree.Clone(),
+		content:  b.content.Clone(),
+		backend:  b.backend.Clone(),
+		modTime:  b.modTime,
+		nodeType: b.nodeType,
+		inode:    inode,
+	}
+}
+
+// User returns the user that last modified this node.
+func (b *Base) User() string {
+	return b.user
+}
+
+// Name returns the name of this node (e.g. /a/b/c -> c)
+// The root directory will have the name empty string.
+func (b *Base) Name() string {
+	return b.name
+}
+
+// TreeHash returns the hash of this node.
+func (b *Base) TreeHash() h.Hash {
+	return b.tree
+}
+
+// ContentHash returns the content hash of this node.
+func (b *Base) ContentHash() h.Hash {
+	return b.content
+}
+
+// BackendHash returns the backend hash of this node.
+func (b *Base) BackendHash() h.Hash {
+	return b.backend
+}
+
+// Type returns the type of this node.
+func (b *Base) Type() NodeType {
+	return b.nodeType
+}
+
+// ModTime will return the last time this node's content
+// was modified. Metadata changes are not recorded.
+func (b *Base) ModTime() time.Time {
+	return b.modTime
+}
+
+// Inode will return a unique ID that is different for each node.
+func (b *Base) Inode() uint64 {
+	return b.inode
 }
 
 /////// UTILS /////////
@@ -118,4 +175,12 @@ func (b *Base) parseBaseAttrsFromNode(capnode capnp_model.Node) error {
 
 	b.inode = capnode.Inode()
 	return nil
+}
+
+func prefixSlash(s string) string {
+	if !strings.HasPrefix(s, "/") {
+		return "/" + s
+	}
+
+	return s
 }
