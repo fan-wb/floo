@@ -1,7 +1,9 @@
 package nodes
 
 import (
+	ie "floo/catfs/errors"
 	h "floo/util/hashlib"
+	"fmt"
 )
 
 // Linker will tell a node how it relates to other nodes
@@ -27,4 +29,79 @@ type Linker interface {
 
 	// MemSetRoot should be called when the current root directory changed.
 	MemSetRoot(root *Directory)
+}
+
+////////////////////////////
+// MOCKING IMPLEMENTATION //
+////////////////////////////
+
+// MockLinker is supposed to be used for testing.
+// It simply holds all nodes in memory. New nodes should be added via AddNode.
+type MockLinker struct {
+	root   *Directory
+	paths  map[string]Node
+	hashes map[string]Node
+}
+
+// NewMockLinker returns a Linker that can be easily used for testing.
+func NewMockLinker() *MockLinker {
+	return &MockLinker{
+		paths:  make(map[string]Node),
+		hashes: make(map[string]Node),
+	}
+}
+
+// Root returns the currently set root.
+// If none was created yet, an empty directory is returned.
+func (ml *MockLinker) Root() (*Directory, error) {
+	if ml.root != nil {
+		return ml.root, nil
+	}
+
+	root, err := NewEmptyDirectory(ml, nil, "", "", 0)
+	if err != nil {
+		return nil, err
+	}
+
+	ml.root = root
+	return root, nil
+}
+
+// LookupNode tries to lookup if there is already a node with this path.
+func (ml *MockLinker) LookupNode(path string) (Node, error) {
+	if node, ok := ml.paths[path]; ok {
+		return node, nil
+	}
+
+	return nil, ie.NoSuchFile(path)
+}
+
+// NodeByHash will return a previously added node (via AddNode) by its hash.
+func (ml *MockLinker) NodeByHash(hash h.Hash) (Node, error) {
+	if node, ok := ml.hashes[hash.B58String()]; ok {
+		return node, nil
+	}
+
+	return nil, fmt.Errorf("no such hash")
+}
+
+// MemSetRoot sets the current root to be `root`.
+func (ml *MockLinker) MemSetRoot(root *Directory) {
+	ml.root = root
+}
+
+// MemIndexSwap will replace a node (referenced by `oldHash`) with `nd`.
+// The path does not change.
+func (ml *MockLinker) MemIndexSwap(nd Node, oldHash h.Hash, updatePathIndex bool) {
+	delete(ml.hashes, oldHash.B58String())
+	ml.AddNode(nd, updatePathIndex)
+}
+
+// AddNode will add a node to the memory index.
+// This is not part of the linker interface.
+func (ml *MockLinker) AddNode(nd Node, updatePathIndex bool) {
+	ml.hashes[nd.TreeHash().B58String()] = nd
+	if updatePathIndex {
+		ml.paths[nd.Path()] = nd
+	}
 }

@@ -25,6 +25,41 @@ type Directory struct {
 	order      []string
 }
 
+// NewEmptyDirectory creates a new empty directory that does not exist yet.
+func NewEmptyDirectory(
+	lkr Linker, parent *Directory, name string, user string, inode uint64,
+) (*Directory, error) {
+	absPath := ""
+	if parent != nil {
+		absPath = path.Join(parent.Path(), name)
+	}
+
+	newDir := &Directory{
+		Base: Base{
+			inode:    inode,
+			user:     user,
+			tree:     h.Sum([]byte(absPath)),
+			content:  h.EmptyInternalHash.Clone(),
+			backend:  h.EmptyBackendHash.Clone(),
+			name:     name,
+			nodeType: NodeTypeDirectory,
+			modTime:  time.Now().Truncate(time.Microsecond),
+		},
+		children: make(map[string]h.Hash),
+		contents: make(map[string]h.Hash),
+		order:    []string{},
+	}
+
+	if parent != nil {
+		// parentName is set by Add:
+		if err := parent.Add(lkr, newDir); err != nil {
+			return nil, err
+		}
+	}
+
+	return newDir, nil
+}
+
 func (d *Directory) String() string {
 	return fmt.Sprintf("<dir %s:%s:%d>", d.Path(), d.TreeHash(), d.Inode())
 }
@@ -393,6 +428,51 @@ func (d *Directory) rebuildOrderCache() {
 	sort.Strings(d.order)
 }
 
+// RemoveChild removes the child named `name` from it's children.
+// There is no way to remove the root node.
+func (d *Directory) RemoveChild(lkr Linker, nd Node) error {
+	name := nd.Name()
+	if _, ok := d.children[name]; !ok {
+		return ie.NoSuchFile(name)
+	}
+
+	// Unset parent from child:
+	if err := nd.SetParent(lkr, nil); err != nil {
+		return err
+	}
+
+	// Delete it from orders and children.
+	// This assumes that it definitely was part of orders before.
+	delete(d.children, name)
+	delete(d.contents, name)
+
+	nameIdx := sort.SearchStrings(d.order, name)
+	d.order = append(d.order[:nameIdx], d.order[nameIdx+1:]...)
+
+	var lastNd Node
+	nodeSize := nd.Size()
+	return d.Up(lkr, func(parent *Directory) error {
+		if nd.Type() != NodeTypeGhost {
+			parent.size -= nodeSize
+		}
+
+		if lastNd != nil {
+			parent.children[lastNd.Name()] = lastNd.TreeHash()
+
+			if nd.Type() != NodeTypeGhost {
+				parent.contents[lastNd.Name()] = lastNd.ContentHash()
+			}
+		}
+
+		if err := parent.rehash(lkr, true); err != nil {
+			return err
+		}
+
+		lastNd = parent
+		return nil
+	})
+}
+
 // NotifyMove should be called whenever a node is being moved.
 func (d *Directory) NotifyMove(lkr Linker, newParent *Directory, newPath string) error {
 	visited := map[string]Node{}
@@ -663,7 +743,7 @@ func (d *Directory) Lookup(lkr Linker, repoPath string) (Node, error) {
 			return nil, ie.NoSuchFile(repoPath)
 		}
 
-		// If the child is a ghost and we did not fully resolve the path
+		// If the child is a ghost, and we did not fully resolve the path
 		// yet we stop here. If it's the ghost of a directory we could
 		// resolve its children, but that would be confusing.
 		if curr.Type() == NodeTypeGhost && idx != len(elems)-1 {
@@ -673,3 +753,6 @@ func (d *Directory) Lookup(lkr Linker, repoPath string) (Node, error) {
 
 	return curr, nil
 }
+
+// Assert that Directory follows the Node interface:
+var _ ModNode = &Directory{}
