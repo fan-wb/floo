@@ -31,7 +31,3 @@ type Mount struct {
 	// notifier Notifier
 	// fs       *catfs.FS
 }
-
-func NewMount(mountpoint string, opts *MountOptions) (*Mount, error) {
-
-}

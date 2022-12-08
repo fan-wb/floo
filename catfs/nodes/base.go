@@ -1,6 +1,7 @@
 package nodes
 
 import (
+	"capnproto.org/go/capnp/v3"
 	capnp_model "floo/catfs/nodes/capnp"
 	h "floo/util/hashlib"
 	"fmt"
@@ -183,4 +184,59 @@ func prefixSlash(s string) string {
 	}
 
 	return s
+}
+
+/////////////////////////////////////////
+// MARSHAL HELPERS FOR ARBITRARY NODES //
+/////////////////////////////////////////
+
+// MarshalNode will convert any Node to a byte string
+// Use UnmarshalNode to load a Node from it again.
+func MarshalNode(nd Node) ([]byte, error) {
+	msg, err := nd.ToCapnp()
+	if err != nil {
+		return nil, err
+	}
+
+	return msg.Marshal()
+}
+
+// UnmarshalNode will try to interpret data as a Node
+func UnmarshalNode(data []byte) (Node, error) {
+	msg, err := capnp.Unmarshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	capNd, err := capnp_model.ReadRootNode(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	return CapNodeToNode(capNd)
+}
+
+// CapNodeToNode converts a capnproto `capNd` to a normal `Node`.
+func CapNodeToNode(capNd capnp_model.Node) (Node, error) {
+	// Find out the correct node struct to initialize.
+	var node Node
+
+	switch typ := capNd.Which(); typ {
+	case capnp_model.Node_Which_ghost:
+		node = &Ghost{}
+	case capnp_model.Node_Which_file:
+		node = &File{}
+	case capnp_model.Node_Which_directory:
+		node = &Directory{}
+	case capnp_model.Node_Which_commit:
+		node = &Commit{}
+	default:
+		return nil, fmt.Errorf("Bad capnp node type `%d`", typ)
+	}
+
+	if err := node.FromCapnpNode(capNd); err != nil {
+		return nil, err
+	}
+
+	return node, nil
 }
