@@ -6,12 +6,12 @@ require (
 	bazil.org/fuse v0.0.0-20200524192727-fb710f7dfd05
 	capnproto.org/go/capnp/v3 v3.0.0-alpha.11
 	github.com/bkaradzic/go-lz4 v1.0.0
+	github.com/dgraph-io/badger v1.5.4
 	github.com/dgraph-io/badger/v3 v3.2103.4
 	github.com/golang/snappy v0.0.3
 	github.com/ipfs/go-ipfs-util v0.0.2
 	github.com/multiformats/go-multihash v0.2.1
 	github.com/pkg/errors v0.9.1
-	github.com/sahib/brig v0.4.1
 	github.com/sahib/config v0.2.0
 	github.com/sdemontfort/go-mimemagic v0.0.0-20150708072242-d026a5785116
 	github.com/sirupsen/logrus v1.9.0
