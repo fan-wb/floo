@@ -595,6 +595,59 @@ func (lkr *Linker) clearStage(batch db.Batch) error {
 	return nil
 }
 
+///////////////////////
+// METADATA HANDLING //
+///////////////////////
+
+// MetadataPut remembers a value persistently identified by `key`.
+// It can be used as single-level key value store for user purposes.
+func (lkr *Linker) MetadataPut(key string, value []byte) error {
+	return lkr.AtomicWithBatch(func(batch db.Batch) (bool, error) {
+		batch.Put([]byte(value), "metadata", key)
+		return false, nil
+	})
+}
+
+// MetadataGet retrieves a previously put key value pair.
+// It will return nil if no such value could be retrieved.
+func (lkr *Linker) MetadataGet(key string) ([]byte, error) {
+	return lkr.kv.Get("metadata", key)
+}
+
+////////////////////////
+// OWNERSHIP HANDLING //
+////////////////////////
+
+// Owner returns the owner of the linker.
+func (lkr *Linker) Owner() (string, error) {
+	if lkr.owner != "" {
+		return lkr.owner, nil
+	}
+
+	data, err := lkr.MetadataGet("owner")
+	if err != nil {
+		return "", err
+	}
+
+	// Cache owner, we don't want to reload it again and again.
+	// It will usually not change during runtime, except SetOwner
+	// is called (which is invalidating the cache anyway)
+	lkr.owner = string(data)
+	return lkr.owner, nil
+}
+
+// SetOwner will set the owner to `owner`.
+func (lkr *Linker) SetOwner(owner string) error {
+	lkr.owner = owner
+	return lkr.MetadataPut("owner", []byte(owner))
+}
+
+// SetABIVersion will set the ABI version to `version`.
+func (lkr *Linker) SetABIVersion(version int) error {
+	sv := strconv.Itoa(version)
+	return lkr.MetadataPut("version", []byte(sv))
+}
+
 ////////////////////////
 // REFERENCE HANDLING //
 ////////////////////////
@@ -910,6 +963,58 @@ func (lkr *Linker) LookupNode(repoPath string) (n.Node, error) {
 	return root.Lookup(lkr, repoPath)
 }
 
+// LookupNodeAt works like LookupNode but returns the node at the state of `cmt`.
+func (lkr *Linker) LookupNodeAt(cmt *n.Commit, repoPath string) (n.Node, error) {
+	root, err := lkr.DirectoryByHash(cmt.Root())
+	if err != nil {
+		return nil, err
+	}
+
+	if root == nil {
+		return nil, nil
+	}
+
+	return root.Lookup(lkr, repoPath)
+}
+
+// LookupModNode is like LookupNode but returns a readily cast ModNode.
+func (lkr *Linker) LookupModNode(repoPath string) (n.ModNode, error) {
+	node, err := lkr.LookupNode(repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if node == nil {
+		return nil, nil
+	}
+
+	snode, ok := node.(n.ModNode)
+	if !ok {
+		return nil, ie.ErrBadNode
+	}
+
+	return snode, nil
+}
+
+// LookupModNodeAt is like LookupNodeAt but with readily cast type.
+func (lkr *Linker) LookupModNodeAt(cmt *n.Commit, repoPath string) (n.ModNode, error) {
+	node, err := lkr.LookupNodeAt(cmt, repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if node == nil {
+		return nil, nil
+	}
+
+	snode, ok := node.(n.ModNode)
+	if !ok {
+		return nil, ie.ErrBadNode
+	}
+
+	return snode, nil
+}
+
 // DirectoryByHash calls NodeByHash and attempts to convert
 // it to a Directory as convenience.
 func (lkr *Linker) DirectoryByHash(hash h.Hash) (*n.Directory, error) {
@@ -928,6 +1033,99 @@ func (lkr *Linker) DirectoryByHash(hash h.Hash) (*n.Directory, error) {
 	}
 
 	return dir, nil
+}
+
+// ResolveDirectory calls ResolveNode and converts the result to a Directory.
+// This only accesses nodes from the filesystem and does not differentiate
+// between ghosts and living nodes.
+func (lkr *Linker) ResolveDirectory(dirPath string) (*n.Directory, error) {
+	nd, err := lkr.ResolveNode(appendDot(path.Clean(dirPath)))
+	if err != nil {
+		return nil, err
+	}
+
+	if nd == nil {
+		return nil, nil
+	}
+
+	dir, ok := nd.(*n.Directory)
+	if !ok {
+		return nil, ie.ErrBadNode
+	}
+
+	return dir, nil
+}
+
+// LookupDirectory calls LookupNode and converts the result to a Directory.
+func (lkr *Linker) LookupDirectory(repoPath string) (*n.Directory, error) {
+	nd, err := lkr.LookupNode(repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if nd == nil {
+		return nil, nil
+	}
+
+	dir, ok := nd.(*n.Directory)
+	if !ok {
+		return nil, ie.ErrBadNode
+	}
+
+	return dir, nil
+}
+
+// FileByHash calls NodeByHash and converts the result to a File.
+func (lkr *Linker) FileByHash(hash h.Hash) (*n.File, error) {
+	nd, err := lkr.NodeByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+
+	file, ok := nd.(*n.File)
+	if !ok {
+		return nil, ie.ErrBadNode
+	}
+
+	return file, nil
+}
+
+// LookupFile calls LookupNode and converts the result to a file.
+func (lkr *Linker) LookupFile(repoPath string) (*n.File, error) {
+	nd, err := lkr.LookupNode(repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if nd == nil {
+		return nil, nil
+	}
+
+	file, ok := nd.(*n.File)
+	if !ok {
+		return nil, ie.ErrBadNode
+	}
+
+	return file, nil
+}
+
+// LookupGhost calls LookupNode and converts the result to a ghost.
+func (lkr *Linker) LookupGhost(repoPath string) (*n.Ghost, error) {
+	nd, err := lkr.LookupNode(repoPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if nd == nil {
+		return nil, nil
+	}
+
+	ghost, ok := nd.(*n.Ghost)
+	if !ok {
+		return nil, ie.ErrBadNode
+	}
+
+	return ghost, nil
 }
 
 // CommitByHash lookups a commit by its hash.
@@ -950,13 +1148,97 @@ func (lkr *Linker) CommitByHash(hash h.Hash) (*n.Commit, error) {
 	return cmt, nil
 }
 
-// helper to return errors that should trigger a rollback in AtomicWithBatch()
-func hintRollback(err error) (bool, error) {
-	if err != nil {
-		return true, err
+// HaveStagedChanges returns true if there were changes in the staging area.
+// If an error occurs, the first return value is undefined.
+func (lkr *Linker) HaveStagedChanges() (bool, error) {
+	head, err := lkr.Head()
+	if err != nil && !ie.IsErrNoSuchRef(err) {
+		return false, err
 	}
 
-	return false, nil
+	if ie.IsErrNoSuchRef(err) {
+		// There is no HEAD yet. Assume we have changes.
+		return true, nil
+	}
+
+	status, err := lkr.Status()
+	if err != nil {
+		return false, err
+	}
+
+	// Check if the root hashes of CURR and HEAD differ.
+	return !status.Root().Equal(head.Root()), nil
+}
+
+// CheckoutCommit resets the current staging commit back to the commit
+// referenced by cmt. If force is false, it will check if there are any staged errors in
+// the staging area and return ErrStageNotEmpty if there are any. If force is
+// true, all changes will be overwritten.
+func (lkr *Linker) CheckoutCommit(cmt *n.Commit, force bool) error {
+	// Check if the staging area is empty if no force given:
+	if !force {
+		haveStaged, err := lkr.HaveStagedChanges()
+		if err != nil {
+			return err
+		}
+
+		if haveStaged {
+			return ie.ErrStageNotEmpty
+		}
+	}
+
+	status, err := lkr.Status()
+	if err != nil {
+		return err
+	}
+
+	root, err := lkr.DirectoryByHash(cmt.Root())
+	if err != nil {
+		return err
+	}
+
+	return lkr.Atomic(func() (bool, error) {
+		// Set the current virtual in-memory cached root
+		lkr.MemSetRoot(root)
+		status.SetRoot(cmt.Root())
+
+		// Invalidate the cache, causing NodeByHash and ResolveNode to load the
+		// file from the boltdb again:
+		lkr.MemIndexClear()
+		return hintRollback(lkr.saveStatus(status))
+	})
+}
+
+// AddMoveMapping takes note that the node with `fromInode` has been moved
+// to `toInode` in the staging commit.
+func (lkr *Linker) AddMoveMapping(fromInode, toInode uint64) (err error) {
+	// Make sure the actual checkout will land as one batch on disk:
+	srcInode := strconv.FormatUint(fromInode, 10)
+	srcToDstKey := []string{"stage", "moves", srcInode}
+
+	dstInode := strconv.FormatUint(toInode, 10)
+	dstToSrcKey := []string{"stage", "moves", dstInode}
+
+	return lkr.AtomicWithBatch(func(batch db.Batch) (bool, error) {
+		if _, err = lkr.kv.Get(srcToDstKey...); err == db.ErrNoSuchKey {
+			line := []byte(fmt.Sprintf("> inode %d", toInode))
+			batch.Put(line, srcToDstKey...)
+			batch.Put(line, "stage", "moves", "overlay", srcInode)
+		} else if err != nil {
+			return hintRollback(err)
+		}
+
+		// Also remember the move in the other direction.
+		if _, err = lkr.kv.Get(dstToSrcKey...); err == db.ErrNoSuchKey {
+			line := []byte(fmt.Sprintf("< inode %d", fromInode))
+			batch.Put(line, dstToSrcKey...)
+			batch.Put(line, "stage", "moves", "overlay", dstInode)
+		} else {
+			return hintRollback(err)
+		}
+
+		return false, nil
+	})
 }
 
 // Atomic is like AtomicWithBatch but does not require using a batch.
@@ -1008,27 +1290,6 @@ func (lkr *Linker) AtomicWithBatch(fn func(batch db.Batch) (bool, error)) (err e
 	}
 
 	return err
-}
-
-// ResolveDirectory calls ResolveNode and converts the result to a Directory.
-// This only accesses nodes from the filesystem and does not differentiate
-// between ghosts and living nodes.
-func (lkr *Linker) ResolveDirectory(dirPath string) (*n.Directory, error) {
-	nd, err := lkr.ResolveNode(appendDot(path.Clean(dirPath)))
-	if err != nil {
-		return nil, err
-	}
-
-	if nd == nil {
-		return nil, nil
-	}
-
-	dir, ok := nd.(*n.Directory)
-	if !ok {
-		return nil, ie.ErrBadNode
-	}
-
-	return dir, nil
 }
 
 func (lkr *Linker) commitMoveMapping(status *n.Commit, exported map[uint64]bool) error {
@@ -1259,4 +1520,227 @@ func (lkr *Linker) parseMoveMappingLine(line string) (n.Node, MoveDir, error) {
 	default:
 		return nil, 0, fmt.Errorf("Unsupported move map type: %s", splitLine[1])
 	}
+}
+
+// MoveEntryPoint tells us if a node participated in a move.
+// If so, the new node and the corresponding move direction is returned.
+func (lkr *Linker) MoveEntryPoint(nd n.Node) (n.Node, MoveDir, error) {
+	moveData, err := lkr.kv.Get(
+		"stage", "moves", "overlay",
+		strconv.FormatUint(nd.Inode(), 10),
+	)
+
+	if err != nil && err != db.ErrNoSuchKey {
+		return nil, MoveDirUnknown, err
+	}
+
+	if moveData == nil {
+		moveData, err = lkr.kv.Get("moves", "overlay", nd.TreeHash().B58String())
+		if err != nil && err != db.ErrNoSuchKey {
+			return nil, MoveDirUnknown, err
+		}
+
+		if moveData == nil {
+			return nil, MoveDirNone, nil
+		}
+	}
+
+	node, moveDir, err := lkr.parseMoveMappingLine(string(moveData))
+	if err != nil {
+		return nil, MoveDirUnknown, err
+	}
+
+	if node == nil {
+		// No move mapping found for this node.
+		// Note that this not an error.
+		return nil, MoveDirNone, nil
+	}
+
+	return node, moveDir, err
+}
+
+// MoveMapping will lookup if the node pointed to by `nd` was part of a moving
+// operation and if so, to what node it was moved and if it was the source or
+// the dest node.
+func (lkr *Linker) MoveMapping(cmt *n.Commit, nd n.Node) (n.Node, MoveDir, error) {
+	// Stage and committed space use a different format to store move mappings.
+	// This is because in staging nodes can still be modified, so the "dest"
+	// part of the mapping is a moving target. Therefore we store the destination
+	// not as hash or path (which also might be moved), but as inode reference.
+	// Inodes always resolve to the latest version of a node.
+	// When committing, the mappings will be "fixed" by converting the inode to
+	// a hash value, to make sure we link to a specific version.
+	status, err := lkr.Status()
+	if err != nil {
+		return nil, MoveDirUnknown, err
+	}
+
+	// Only look into staging if we are actually in the STATUS commit.
+	// The lookups in the stage level are on an inode base. This would
+	// cause jumping around in the history for older commits.
+	if cmt == nil || cmt.TreeHash().Equal(status.TreeHash()) {
+		inodeKey := strconv.FormatUint(nd.Inode(), 10)
+		moveData, err := lkr.kv.Get("stage", "moves", inodeKey)
+		if err != nil && err != db.ErrNoSuchKey {
+			return nil, MoveDirUnknown, err
+		}
+
+		if err != db.ErrNoSuchKey {
+			node, moveDir, err := lkr.parseMoveMappingLine(string(moveData))
+			if err != nil {
+				return nil, MoveDirUnknown, err
+			}
+
+			if node != nil {
+				return node, moveDir, err
+			}
+		}
+	}
+
+	if cmt == nil {
+		return nil, MoveDirNone, nil
+	}
+
+	moveData, err := lkr.kv.Get("moves", cmt.TreeHash().B58String(), nd.TreeHash().B58String())
+	if err != nil && err != db.ErrNoSuchKey {
+		return nil, MoveDirUnknown, err
+	}
+
+	if moveData == nil {
+		return nil, MoveDirNone, nil
+	}
+
+	node, moveDir, err := lkr.parseMoveMappingLine(string(moveData))
+	if err != nil {
+		return nil, MoveDirUnknown, err
+	}
+
+	if node == nil {
+		// No move mapping found for this node.
+		// Note that this not an error.
+		return nil, MoveDirNone, nil
+	}
+
+	return node, moveDir, err
+}
+
+// ExpandAbbrev tries to find an object reference that stats with `abbrev`.
+// If so, it will return the respective hash for it.
+// If none is found, it is considered as an error.
+// If more than one was found ie.ErrAmbigious is returned.
+func (lkr *Linker) ExpandAbbrev(abbrev string) (h.Hash, error) {
+	prefixes := [][]string{
+		{"stage", "objects"},
+		{"objects"},
+	}
+
+	// Special case: Make it possible to abbrev the commit
+	// of ``curr`` - it does live in stage/STATUS, not somewhere else.
+	curr, err := lkr.Status()
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.HasPrefix(curr.TreeHash().B58String(), abbrev) {
+		return curr.TreeHash(), nil
+	}
+
+	for _, prefix := range prefixes {
+		matches, err := lkr.kv.Glob(append(prefix, abbrev))
+		if err != nil {
+			return nil, err
+		}
+
+		if len(matches) > 1 {
+			return nil, ie.ErrAmbigiousRev
+		}
+
+		if len(matches) == 0 {
+			continue
+		}
+
+		match := matches[0]
+		return h.FromB58String(match[len(match)-1])
+	}
+
+	return nil, fmt.Errorf("No such abbrev: %v", abbrev)
+}
+
+// IterAll goes over all nodes in the commit range `from` until (including) `to`.
+// Already visited nodes will not be visited again if they did not change.
+// If `from` is nil, HEAD is assumed.
+// If `to` is nil, INIT is assumed.
+func (lkr *Linker) IterAll(from, to *n.Commit, fn func(n.ModNode, *n.Commit) error) error {
+	visited := make(map[string]struct{})
+	return lkr.iterAll(from, to, visited, fn)
+}
+
+func (lkr *Linker) iterAll(from, to *n.Commit, visited map[string]struct{}, fn func(n.ModNode, *n.Commit) error) error {
+	if from == nil {
+		head, err := lkr.Status()
+		if err != nil {
+			return err
+		}
+
+		from = head
+	}
+
+	root, err := lkr.DirectoryByHash(from.Root())
+	if err != nil {
+		return err
+	}
+
+	walker := func(child n.Node) error {
+		if _, ok := visited[child.TreeHash().B58String()]; ok {
+			return n.ErrSkipChild
+		}
+
+		modChild, ok := child.(n.ModNode)
+		if !ok {
+			return ie.ErrBadNode
+		}
+
+		visited[child.TreeHash().B58String()] = struct{}{}
+		return fn(modChild, from)
+	}
+
+	if err := n.Walk(lkr, root, false, walker); err != nil {
+		return e.Wrapf(err, "iter-all: walk")
+	}
+
+	// Check if we're already at the lowest commit:
+	if to != nil && from.TreeHash().Equal(to.TreeHash()) {
+		return nil
+	}
+
+	prev, err := from.Parent(lkr)
+	if err != nil {
+		return err
+	}
+
+	if prev == nil {
+		// Definite end of line.
+		return nil
+	}
+
+	prevCmt, ok := prev.(*n.Commit)
+	if !ok {
+		return ie.ErrBadNode
+	}
+
+	return lkr.iterAll(prevCmt, to, visited, fn)
+}
+
+// helper to return errors that should trigger a rollback in AtomicWithBatch()
+func hintRollback(err error) (bool, error) {
+	if err != nil {
+		return true, err
+	}
+
+	return false, nil
+}
+
+// KV returns the key value store passed when constructing the linker.
+func (lkr *Linker) KV() db.Database {
+	return lkr.kv
 }

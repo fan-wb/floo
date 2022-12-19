@@ -49,11 +49,11 @@ type Database interface {
 	Close() error
 
 	// Glob finds all existing keys in the store, starting with `prefix`
-	Glob(prefix string) ([][]string, error)
+	Glob(prefix []string) ([][]string, error)
 }
 
 var (
-	ErrNoSuchKey = errors.New("The key does not exist")
+	ErrNoSuchKey = errors.New("this key does not exist")
 )
 
 // CopyKey is a helper method to copy a bunch of keys in `src` to `dst`.
