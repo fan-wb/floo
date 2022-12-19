@@ -2,7 +2,6 @@ package testutil
 
 import (
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"testing"
@@ -37,7 +36,7 @@ func CreateRandomDummyBuf(size, seed int64) []byte {
 // CreateFile creates a temporary file in the systems tmp-folder.
 // The file will be `size` bytes big, filled with content from CreateDummyBuf.
 func CreateFile(size int64) string {
-	fd, err := ioutil.TempFile("", "brig_test")
+	fd, err := os.CreateTemp("", "floo_test")
 	if err != nil {
 		panic("Cannot create temp file")
 	}

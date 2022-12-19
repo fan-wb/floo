@@ -743,8 +743,8 @@ func (d *Directory) Lookup(lkr Linker, repoPath string) (Node, error) {
 			return nil, ie.NoSuchFile(repoPath)
 		}
 
-		// If the child is a ghost, and we did not fully resolve the path
-		// yet we stop here. If it's the ghost of a directory we could
+		// If the child is a ghost, and we did not fully resolve the path yet,
+		// we stop here. If it's the ghost of a directory we could
 		// resolve its children, but that would be confusing.
 		if curr.Type() == NodeTypeGhost && idx != len(elems)-1 {
 			return nil, ie.NoSuchFile(repoPath)

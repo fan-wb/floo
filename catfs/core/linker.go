@@ -430,6 +430,171 @@ func (lkr *Linker) CommitByIndex(index int64) (*n.Commit, error) {
 // COMMIT HANDLING //
 /////////////////////
 
+// SetMergeMarker sets the current status to be a merge commit.
+// Note that this function only will have a result when MakeCommit() is called afterwards.
+// Otherwise, the changes will not be written to disk.
+func (lkr *Linker) SetMergeMarker(with string, remoteHead h.Hash) error {
+	status, err := lkr.Status()
+	if err != nil {
+		return err
+	}
+
+	status.SetMergeMarker(with, remoteHead)
+	return lkr.saveStatus(status)
+}
+
+// MakeCommit creates a new full commit in the version history.
+// The current staging commit is finalized with `author` and `message`
+// and gets saved. A new, identical staging commit is created pointing
+// to the root of the now new HEAD.
+//
+// If nothing changed since the last call to MakeCommit, it will
+// return ErrNoChange, which can be reacted upon.
+func (lkr *Linker) MakeCommit(author string, message string) error {
+	return lkr.AtomicWithBatch(func(batch db.Batch) (bool, error) {
+		switch err := lkr.makeCommit(batch, author, message); err {
+		case ie.ErrNoChange:
+			return false, err
+		case nil:
+			return false, nil
+		default:
+			return true, err
+		}
+	})
+}
+
+func (lkr *Linker) makeCommit(batch db.Batch, author string, message string) error {
+	head, err := lkr.Head()
+	if err != nil && !ie.IsErrNoSuchRef(err) {
+		return err
+	}
+
+	status, err := lkr.Status()
+	if err != nil {
+		return err
+	}
+
+	// Only compare with previous if we have a HEAD yet.
+	if head != nil {
+		if status.Root().Equal(head.Root()) {
+			return ie.ErrNoChange
+		}
+	}
+
+	rootDir, err := lkr.Root()
+	if err != nil {
+		return err
+	}
+
+	// Go over all files/directories and save them in tree & objects.
+	// Note that this will only move nodes that are reachable from the current
+	// commit root. Intermediate nodes will not be copied.
+	exportedInodes, err := lkr.makeCommitPutCurrToPersistent(batch, rootDir)
+	if err != nil {
+		return err
+	}
+
+	// NOTE: `head` may be nil, if it couldn't be resolved,
+	//        or (maybe more likely) if this is the first commit.
+	if head != nil {
+		if err := status.SetParent(lkr, head); err != nil {
+			return err
+		}
+	}
+
+	if err := status.BoxCommit(author, message); err != nil {
+		return err
+	}
+
+	statusData, err := n.MarshalNode(status)
+	if err != nil {
+		return err
+	}
+
+	statusB58Hash := status.TreeHash().B58String()
+	batch.Put(statusData, "objects", statusB58Hash)
+
+	// Remember this commit under its index:
+	batch.Put([]byte(statusB58Hash), "index", strconv.FormatInt(status.Index(), 10))
+
+	if err := lkr.SaveRef("HEAD", status); err != nil {
+		return err
+	}
+
+	// Check if we have already tagged the initial commit.
+	if _, err := lkr.ResolveRef("init"); err != nil {
+		if !ie.IsErrNoSuchRef(err) {
+			// Some other error happened.
+			return err
+		}
+
+		// This is probably the first commit. Tag it.
+		if err := lkr.SaveRef("INIT", status); err != nil {
+			return err
+		}
+	}
+
+	// Fixate the moved paths in the stage:
+	if err := lkr.commitMoveMapping(status, exportedInodes); err != nil {
+		return err
+	}
+
+	if err := lkr.clearStage(batch); err != nil {
+		return err
+	}
+
+	newStatus, err := n.NewEmptyCommit(lkr.NextInode(), status.Index()+1)
+	if err != nil {
+		return err
+	}
+
+	newStatus.SetRoot(status.Root())
+	if err := newStatus.SetParent(lkr, status); err != nil {
+		return err
+	}
+
+	return lkr.saveStatus(newStatus)
+}
+
+func (lkr *Linker) makeCommitPutCurrToPersistent(batch db.Batch, rootDir *n.Directory) (map[uint64]bool, error) {
+	exportedInodes := make(map[uint64]bool)
+	return exportedInodes, n.Walk(lkr, rootDir, true, func(child n.Node) error {
+		data, err := n.MarshalNode(child)
+		if err != nil {
+			return err
+		}
+
+		b58Hash := child.TreeHash().B58String()
+		batch.Put(data, "objects", b58Hash)
+		exportedInodes[child.Inode()] = true
+
+		childPath := child.Path()
+		if child.Type() == n.NodeTypeDirectory {
+			childPath = appendDot(childPath)
+		}
+
+		batch.Put([]byte(b58Hash), "tree", childPath)
+		return nil
+	})
+}
+
+func (lkr *Linker) clearStage(batch db.Batch) error {
+	// Clear the staging area.
+	toClear := [][]string{
+		{"stage", "objects"},
+		{"stage", "tree"},
+		{"stage", "moves"},
+	}
+
+	for _, key := range toClear {
+		if err := batch.Clear(key...); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 ////////////////////////
 // REFERENCE HANDLING //
 ////////////////////////
@@ -864,4 +1029,234 @@ func (lkr *Linker) ResolveDirectory(dirPath string) (*n.Directory, error) {
 	}
 
 	return dir, nil
+}
+
+func (lkr *Linker) commitMoveMapping(status *n.Commit, exported map[uint64]bool) error {
+	return lkr.AtomicWithBatch(func(batch db.Batch) (bool, error) {
+		keys, err := lkr.kv.Keys("stage", "moves")
+		if err != nil {
+			return hintRollback(err)
+		}
+
+		for _, key := range keys {
+			if err := lkr.commitMoveMappingKey(batch, status, exported, key); err != nil {
+				return hintRollback(err)
+			}
+		}
+
+		return false, nil
+	})
+}
+
+const (
+	// MoveDirUnknown should only be used for init purposes.
+	MoveDirUnknown = iota
+	// MoveDirSrcToDst means that this file was moved from source to dest.
+	// (Therefore it is the new destination file and probably not a ghost)
+	MoveDirSrcToDst
+	// MoveDirDstToSrc means that this place was moved somewhere else.
+	// (Therefore it is a likely a ghost and the new file lives somewhere else)
+	MoveDirDstToSrc
+	// MoveDirNone tells us that this file did not move.
+	MoveDirNone
+)
+
+// MoveDir describes the direction of a move.
+type MoveDir int
+
+func (md MoveDir) String() string {
+	switch md {
+	case MoveDirSrcToDst:
+		return ">"
+	case MoveDirDstToSrc:
+		return "<"
+	case MoveDirNone:
+		return "*"
+	default:
+		return ""
+	}
+}
+
+// Invert changes the direction of a move, if it has one.
+func (md MoveDir) Invert() MoveDir {
+	switch md {
+	case MoveDirSrcToDst:
+		return MoveDirDstToSrc
+	case MoveDirDstToSrc:
+		return MoveDirSrcToDst
+	default:
+		return md
+	}
+}
+
+func moveDirFromString(spec string) MoveDir {
+	switch spec {
+	case ">":
+		return MoveDirSrcToDst
+	case "<":
+		return MoveDirDstToSrc
+	case "*":
+		return MoveDirNone
+	default:
+		return MoveDirUnknown
+	}
+}
+
+// Process a single key of the move mapping:
+func (lkr *Linker) commitMoveMappingKey(
+	batch db.Batch,
+	status *n.Commit,
+	exported map[uint64]bool,
+	key []string,
+) error {
+	inode, err := strconv.ParseUint(key[len(key)-1], 10, 64)
+	if err != nil {
+		return err
+	}
+
+	// Only export move mapping that relate to nodes that were actually
+	// exported from staging. We do not want to export intermediate moves.
+	if _, ok := exported[inode]; !ok {
+		return nil
+	}
+
+	data, err := lkr.kv.Get(key...)
+	if err != nil {
+		return err
+	}
+
+	dstNode, moveDirection, err := lkr.parseMoveMappingLine(string(data))
+	if err != nil {
+		return err
+	}
+
+	if moveDirection == MoveDirDstToSrc {
+		return nil
+	}
+
+	if dstNode == nil {
+		return fmt.Errorf("failed to find dest node for commit map: %v", string(data))
+	}
+
+	srcNode, err := lkr.NodeByInode(inode)
+	if err != nil {
+		return err
+	}
+
+	if srcNode == nil {
+		return fmt.Errorf("Failed to find source node for commit map: %d", inode)
+	}
+
+	// Write a bidirectional mapping for this node:
+	dstB58 := dstNode.TreeHash().B58String()
+	srcB58 := srcNode.TreeHash().B58String()
+
+	forwardLine := fmt.Sprintf("%v hash %s", moveDirection, dstB58)
+	batch.Put(
+		[]byte(forwardLine),
+		"moves", status.TreeHash().B58String(), srcB58,
+	)
+
+	batch.Put(
+		[]byte(forwardLine),
+		"moves", "overlay", srcB58,
+	)
+
+	reverseLine := fmt.Sprintf(
+		"%v hash %s",
+		moveDirection.Invert(),
+		srcB58,
+	)
+
+	batch.Put(
+		[]byte(reverseLine),
+		"moves", status.TreeHash().B58String(), dstB58,
+	)
+
+	batch.Put(
+		[]byte(reverseLine),
+		"moves", "overlay", dstB58,
+	)
+
+	// We need to verify that all ghosts will be copied out from staging.
+	// In some special cases, not all used ghosts are reachable in
+	// MakeCommit.
+	//
+	// Consider for example this case:
+	//
+	// $ touch x
+	// $ commit
+	// $ move x y
+	// $ touch x
+	// $ commit
+	//
+	// => In the last commit the ghost from the move (x) is overwritten by
+	// a new file and thus will not be reachable anymore. In order to store
+	// the full history of the file we need to also keep this ghost.
+	for _, checkHash := range []string{dstB58, srcB58} {
+		srcKey := []string{"stage", "objects", checkHash}
+		dstKey := []string{"objects", checkHash}
+
+		_, err = lkr.kv.Get(dstKey...)
+		if err == db.ErrNoSuchKey {
+			err = nil
+
+			// This part of the move was not reachable, we need to copy it
+			// to the object store additionally.
+			if err := db.CopyKey(lkr.kv, srcKey, dstKey); err != nil {
+				return err
+			}
+		}
+
+		if err != nil {
+			return err
+		}
+	}
+
+	// We already have a bidir mapping for this node, no need to mention
+	// them further.  (would not hurt, but would be duplicated work)
+	delete(exported, srcNode.Inode())
+	delete(exported, dstNode.Inode())
+	return nil
+}
+
+func (lkr *Linker) parseMoveMappingLine(line string) (n.Node, MoveDir, error) {
+	splitLine := strings.SplitN(line, " ", 3)
+	if len(splitLine) < 3 {
+		return nil, 0, fmt.Errorf("Malformed stage move line: `%s`", line)
+	}
+
+	dir := moveDirFromString(splitLine[0])
+	if dir == MoveDirUnknown {
+		return nil, 0, fmt.Errorf("Unrecognized move direction `%s`", splitLine[0])
+	}
+
+	switch splitLine[1] {
+	case "inode":
+		inode, err := strconv.ParseUint(splitLine[2], 10, 64)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		node, err := lkr.NodeByInode(inode)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		return node, dir, nil
+	case "hash":
+		hash, err := h.FromB58String(splitLine[2])
+		if err != nil {
+			return nil, 0, err
+		}
+
+		node, err := lkr.NodeByHash(hash)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		return node, dir, nil
+	default:
+		return nil, 0, fmt.Errorf("Unsupported move map type: %s", splitLine[1])
+	}
 }

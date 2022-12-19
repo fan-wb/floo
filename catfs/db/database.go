@@ -55,3 +55,15 @@ type Database interface {
 var (
 	ErrNoSuchKey = errors.New("The key does not exist")
 )
+
+// CopyKey is a helper method to copy a bunch of keys in `src` to `dst`.
+func CopyKey(db Database, src, dst []string) error {
+	data, err := db.Get(src...)
+	if err != nil {
+		return err
+	}
+
+	batch := db.Batch()
+	batch.Put(data, dst...)
+	return batch.Flush()
+}
