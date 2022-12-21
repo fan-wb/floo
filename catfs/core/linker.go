@@ -1627,7 +1627,7 @@ func (lkr *Linker) MoveMapping(cmt *n.Commit, nd n.Node) (n.Node, MoveDir, error
 // ExpandAbbrev tries to find an object reference that stats with `abbrev`.
 // If so, it will return the respective hash for it.
 // If none is found, it is considered as an error.
-// If more than one was found ie.ErrAmbigious is returned.
+// If more than one was found ie.ErrAmbiguous is returned.
 func (lkr *Linker) ExpandAbbrev(abbrev string) (h.Hash, error) {
 	prefixes := [][]string{
 		{"stage", "objects"},
