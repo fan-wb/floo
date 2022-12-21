@@ -1041,12 +1041,10 @@ func (lkr *Linker) DirectoryByHash(hash h.Hash) (*n.Directory, error) {
 func (lkr *Linker) ResolveDirectory(dirPath string) (*n.Directory, error) {
 	nd, err := lkr.ResolveNode(appendDot(path.Clean(dirPath)))
 	if err != nil {
-		fmt.Println("11111111111")
 		return nil, err
 	}
 
 	if nd == nil {
-		fmt.Println("22222222222")
 		return nil, nil
 	}
 
