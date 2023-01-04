@@ -5,6 +5,7 @@ import (
 	ie "floo/catfs/errors"
 	n "floo/catfs/nodes"
 	h "floo/util/hashlib"
+	log "github.com/sirupsen/logrus"
 )
 
 // GarbageCollector implements a small mark & sweep garbage collector.
@@ -161,4 +162,58 @@ func (gc *GarbageCollector) findAllMoveLocations(head *n.Commit) ([][]string, er
 	}
 
 	return locations, nil
+}
+
+// Run will trigger a GC run.
+// If `allObjects` is false, only the staging commit will be checked.
+// Otherwise,check all objects in the key value store.
+func (gc *GarbageCollector) Run(allObjects bool) error {
+	gc.markMap = make(map[string]struct{})
+	head, err := gc.lkr.Status()
+	if err != nil {
+		return err
+	}
+
+	if err := gc.mark(head, allObjects); err != nil {
+		return err
+	}
+
+	// Staging might contain moved files that are not reachable anymore,
+	// but still are referenced by the move mapping.
+	// Keep them for now, they will die most likely on MakeCommit()
+	moveMapLocations := [][]string{
+		{"stage", "moves"},
+	}
+
+	if allObjects {
+		moveMapLocations, err = gc.findAllMoveLocations(head)
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, location := range moveMapLocations {
+		if err := gc.markMoveMap(location); err != nil {
+			return err
+		}
+	}
+
+	removed, err := gc.sweep([]string{"stage", "objects"})
+	if err != nil {
+		log.Debugf("removed %d unreachable staging objects.", removed)
+	}
+
+	if allObjects {
+		removed, err = gc.sweep([]string{"objects"})
+		if err != nil {
+			return err
+		}
+
+		if removed > 0 {
+			log.Warningf("removed %d unreachable permanent objects.", removed)
+			log.Warningf("this might indiciate a bug in catfs somewhere.")
+		}
+	}
+
+	return nil
 }
