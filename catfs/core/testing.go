@@ -2,6 +2,7 @@ package core
 
 import (
 	"floo/catfs/db"
+	ie "floo/catfs/errors"
 	n "floo/catfs/nodes"
 	h "floo/util/hashlib"
 	"fmt"
@@ -103,4 +104,29 @@ func MustTouchAndCommit(t *testing.T, lkr *Linker, path string, seed byte) (*n.F
 	}
 
 	return file, MustCommit(t, lkr, fmt.Sprintf("cmt %d", seed))
+}
+
+// MustModify changes the content of an existing node.
+func MustModify(t *testing.T, lkr *Linker, file *n.File, seed int) {
+	parent, err := lkr.LookupDirectory(path.Dir(file.Path()))
+	// root, err := lkr.Root()
+	if err != nil {
+		t.Fatalf("Failed to get root: %v", err)
+	}
+
+	if err := parent.RemoveChild(lkr, file); err != nil && !ie.IsNoSuchFileError(err) {
+		t.Fatalf("Unable to remove %s from /: %v", file.Path(), err)
+	}
+
+	file.SetSize(uint64(seed))
+	file.SetBackend(lkr, h.TestDummy(t, byte(seed)))
+	file.SetContent(lkr, h.TestDummy(t, byte(seed)))
+
+	if err := parent.Add(lkr, file); err != nil {
+		t.Fatalf("Unable to add %s to /: %v", file.Path(), err)
+	}
+
+	if err := lkr.StageNode(file); err != nil {
+		t.Fatalf("Failed to stage %s for second: %v", file.Path(), err)
+	}
 }
