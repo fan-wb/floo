@@ -2,9 +2,11 @@ package nodes
 
 import (
 	"capnproto.org/go/capnp/v3"
+	ie "floo/catfs/errors"
 	capnp_model "floo/catfs/nodes/capnp"
 	h "floo/util/hashlib"
 	"fmt"
+	e "github.com/pkg/errors"
 	"strings"
 	"time"
 )
@@ -231,7 +233,7 @@ func CapNodeToNode(capNd capnp_model.Node) (Node, error) {
 	case capnp_model.Node_Which_commit:
 		node = &Commit{}
 	default:
-		return nil, fmt.Errorf("Bad capnp node type `%d`", typ)
+		return nil, fmt.Errorf("bad capnp node type `%d`", typ)
 	}
 
 	if err := node.FromCapnpNode(capNd); err != nil {
@@ -239,4 +241,97 @@ func CapNodeToNode(capNd capnp_model.Node) (Node, error) {
 	}
 
 	return node, nil
+}
+
+//////////////////////////
+// GENERAL NODE HELPERS //
+//////////////////////////
+
+// Depth returns the depth of the node.
+// It does this by looking at the path separators.
+// The depth of "/" is defined as 0.
+func Depth(nd Node) int {
+	path := nd.Path()
+	if path == "/" {
+		return 0
+	}
+
+	depth := 0
+	for _, rn := range path {
+		if rn == '/' {
+			depth++
+		}
+	}
+
+	return depth
+}
+
+// RemoveNode removes `nd` from its parent directory using `lkr`.
+// Removing the root is a no-op.
+func RemoveNode(lkr Linker, nd Node) error {
+	parDir, err := ParentDirectory(lkr, nd)
+	if err != nil {
+		return err
+	}
+
+	// Cannot remove root:
+	if parDir == nil {
+		return nil
+	}
+
+	return parDir.RemoveChild(lkr, nd)
+}
+
+// ParentDirectory returns the parent directory of `nd`.
+// For the root it will return nil.
+func ParentDirectory(lkr Linker, nd Node) (*Directory, error) {
+	par, err := nd.Parent(lkr)
+	if err != nil {
+		return nil, err
+	}
+
+	if par == nil {
+		return nil, nil
+	}
+
+	parDir, ok := par.(*Directory)
+	if !ok {
+		return nil, ie.ErrBadNode
+	}
+
+	return parDir, nil
+}
+
+// ContentHash returns the correct content hash for `nd`.
+// This also works for ghosts where the content hash is taken from the
+// underlying node (ghosts themselves have no content).
+func ContentHash(nd Node) (h.Hash, error) {
+	switch nd.Type() {
+	case NodeTypeDirectory, NodeTypeCommit, NodeTypeFile:
+		return nd.ContentHash(), nil
+	case NodeTypeGhost:
+		ghost, ok := nd.(*Ghost)
+		if !ok {
+			return nil, e.Wrapf(ie.ErrBadNode, "cannot convert to ghost")
+		}
+
+		switch ghost.OldNode().Type() {
+		case NodeTypeFile:
+			oldFile, err := ghost.OldFile()
+			if err != nil {
+				return nil, err
+			}
+
+			return oldFile.ContentHash(), nil
+		case NodeTypeDirectory:
+			oldDirectory, err := ghost.OldDirectory()
+			if err != nil {
+				return nil, err
+			}
+
+			return oldDirectory.ContentHash(), nil
+		}
+	}
+
+	return nil, ie.ErrBadNode
 }

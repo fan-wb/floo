@@ -178,3 +178,175 @@ func TestLinkerPersistence(t *testing.T) {
 		t.Fatalf("Closing the second kv failed: %v", err)
 	}
 }
+
+func TestCollideSameObjectHash(t *testing.T) {
+	WithDummyKv(t, func(kv db.Database) {
+		lkr := NewLinker(kv)
+		root, err := lkr.Root()
+		if err != nil {
+			t.Fatalf("Failed to retrieve root: %v", err)
+		}
+
+		sub, err := n.NewEmptyDirectory(lkr, root, "sub", "u", 3)
+		if err != nil {
+			t.Fatalf("Creating empty sub dir failed: %v", err)
+			return
+		}
+
+		if err := lkr.StageNode(sub); err != nil {
+			t.Fatalf("Staging /sub failed: %v", err)
+		}
+
+		file1 := n.NewEmptyFile(sub, "a.png", "u", 4)
+		if err != nil {
+			t.Fatalf("Failed to create empty file1: %v", err)
+		}
+
+		file2 := n.NewEmptyFile(root, "a.png", "u", 5)
+		if err != nil {
+			t.Fatalf("Failed to create empty file2: %v", err)
+		}
+
+		file3 := n.NewEmptyFile(root, "b.png", "u", 6)
+		if err != nil {
+			t.Fatalf("Failed to create empty file3: %v", err)
+		}
+
+		file1.SetContent(lkr, h.TestDummy(t, 1))
+		file2.SetContent(lkr, h.TestDummy(t, 1))
+		file3.SetContent(lkr, h.TestDummy(t, 1))
+
+		if err := sub.Add(lkr, file1); err != nil {
+			t.Fatalf("Failed to add file1: %v", err)
+		}
+		if err := root.Add(lkr, file2); err != nil {
+			t.Fatalf("Failed to add file2: %v", err)
+		}
+		if err := root.Add(lkr, file3); err != nil {
+			t.Fatalf("Failed to add file3: %v", err)
+		}
+
+		if err := lkr.StageNode(file1); err != nil {
+			t.Fatalf("Failed to stage file1: %v", err)
+		}
+		if err := lkr.StageNode(file2); err != nil {
+			t.Fatalf("Failed to stage file2: %v", err)
+		}
+		if err := lkr.StageNode(file3); err != nil {
+			t.Fatalf("Failed to stage file3: %v", err)
+		}
+
+		if file1.TreeHash().Equal(file2.TreeHash()) {
+			t.Fatalf("file1 and file2 hash is equal: %v", file1.TreeHash())
+		}
+		if file2.TreeHash().Equal(file3.TreeHash()) {
+			t.Fatalf("file2 and file3 hash is equal: %v", file2.TreeHash())
+		}
+
+		// Make sure we load the actual hashes from disk:
+		lkr.MemIndexClear()
+		file1Reset, err := lkr.LookupFile("/sub/a.png")
+		if err != nil {
+			t.Fatalf("Re-Lookup of file1 failed: %v", err)
+		}
+		file2Reset, err := lkr.LookupFile("/a.png")
+		if err != nil {
+			t.Fatalf("Re-Lookup of file2 failed: %v", err)
+		}
+		file3Reset, err := lkr.LookupFile("/b.png")
+		if err != nil {
+			t.Fatalf("Re-Lookup of file3 failed: %v", err)
+		}
+
+		if file1Reset.TreeHash().Equal(file2Reset.TreeHash()) {
+			t.Fatalf("file1Reset and file2Reset hash is equal: %v", file1.TreeHash())
+		}
+		if file2Reset.TreeHash().Equal(file3Reset.TreeHash()) {
+			t.Fatalf("file2Reset and file3Reset hash is equal: %v", file2.TreeHash())
+		}
+	})
+}
+func TestHaveStagedChanges(t *testing.T) {
+	WithDummyLinker(t, func(lkr *Linker) {
+		hasChanges, err := lkr.HaveStagedChanges()
+		if err != nil {
+			t.Fatalf("have staged changes failed before touch: %v", err)
+		}
+		if hasChanges {
+			t.Fatalf("HaveStagedChanges has changes before something happened")
+		}
+
+		MustTouch(t, lkr, "/x.png", 1)
+
+		hasChanges, err = lkr.HaveStagedChanges()
+		if err != nil {
+			t.Fatalf("have staged changes failed after touch: %v", err)
+		}
+		if !hasChanges {
+			t.Fatalf("HaveStagedChanges has no changes after something happened")
+		}
+
+		MustCommit(t, lkr, "second")
+
+		hasChanges, err = lkr.HaveStagedChanges()
+		if err != nil {
+			t.Fatalf("have staged changes failed after commit: %v", err)
+		}
+		if hasChanges {
+			t.Fatalf("HaveStagedChanges has changes after commit")
+		}
+	})
+}
+
+func TestFilesByContent(t *testing.T) {
+	WithDummyLinker(t, func(lkr *Linker) {
+		file := MustTouch(t, lkr, "/x.png", 1)
+
+		contents := []h.Hash{file.BackendHash()}
+		result, err := lkr.FilesByContents(contents)
+
+		require.Nil(t, err)
+
+		resultFile, ok := result[file.BackendHash().B58String()]
+		require.True(t, ok)
+		require.Len(t, result, 1)
+		require.Equal(t, file, resultFile)
+	})
+}
+
+func TestResolveRef(t *testing.T) {
+	WithDummyLinker(t, func(lkr *Linker) {
+		initCmt, err := lkr.Head()
+		require.Nil(t, err)
+
+		cmts := []*n.Commit{initCmt}
+		for idx := 0; idx < 10; idx++ {
+			_, cmt := MustTouchAndCommit(t, lkr, "/x", byte(idx))
+			cmts = append([]*n.Commit{cmt}, cmts...)
+		}
+
+		// Insert the init cmt a few times as fodder:
+		cmts = append(cmts, initCmt)
+		cmts = append(cmts, initCmt)
+		cmts = append(cmts, initCmt)
+
+		for nUp := 0; nUp < len(cmts)+3; nUp++ {
+			refname := "head"
+			for idx := 0; idx < nUp; idx++ {
+				refname += "^"
+			}
+
+			expect := initCmt
+			if nUp < len(cmts) {
+				expect = cmts[nUp]
+			}
+
+			ref, err := lkr.ResolveRef(refname)
+			require.Nil(t, err)
+			require.Equal(t, expect, ref)
+		}
+
+		_, err = lkr.ResolveRef("he^^ad")
+		require.Equal(t, err, ie.ErrNoSuchRef("he^^ad"))
+	})
+}
