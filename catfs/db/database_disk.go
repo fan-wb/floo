@@ -155,7 +155,7 @@ func (db *DiskDatabase) Get(key ...string) ([]byte, error) {
 	// We have to go to the disk to find the right key:
 	filePath := filepath.Join(db.basePath, fixDirectoryKeys(key))
 
-	fmt.Println(filePath)
+	// fmt.Println(filePath)
 	data, err := os.ReadFile(filePath) // #nosec
 
 	if os.IsNotExist(err) {

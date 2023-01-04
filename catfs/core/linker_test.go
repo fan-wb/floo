@@ -1,12 +1,15 @@
 package core
 
 import (
+	"errors"
 	"floo/catfs/db"
 	ie "floo/catfs/errors"
 	n "floo/catfs/nodes"
 	h "floo/util/hashlib"
+	"fmt"
 	"github.com/stretchr/testify/require"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"unsafe"
@@ -348,5 +351,183 @@ func TestResolveRef(t *testing.T) {
 
 		_, err = lkr.ResolveRef("he^^ad")
 		require.Equal(t, err, ie.ErrNoSuchRef("he^^ad"))
+	})
+}
+
+type iterResult struct {
+	path, commit string
+}
+
+func TestIterAll(t *testing.T) {
+	WithDummyLinker(t, func(lkr *Linker) {
+		init, err := lkr.Head()
+		require.Nil(t, err)
+		c0 := init.TreeHash().B58String()
+
+		x := MustTouch(t, lkr, "/x", 1)
+		MustTouch(t, lkr, "/y", 1)
+		first := MustCommit(t, lkr, "first")
+		c1 := first.TreeHash().B58String()
+		MustModify(t, lkr, x, 2)
+
+		status, err := lkr.Status()
+		require.Nil(t, err)
+		c2 := status.TreeHash().B58String()
+
+		results := []iterResult{}
+		require.Nil(t, lkr.IterAll(nil, nil, func(nd n.ModNode, cmt *n.Commit) error {
+			results = append(results, iterResult{nd.Path(), cmt.TreeHash().B58String()})
+			return nil
+		}))
+
+		sort.Slice(results, func(i, j int) bool {
+			// Do not change orderings between commits:
+			if results[i].commit != results[j].commit {
+				return false
+			}
+
+			return results[i].path < results[j].path
+		})
+
+		expected := []iterResult{
+			{"/", c2},
+			{"/x", c2},
+			{"/y", c2},
+			{"/", c1},
+			{"/x", c1},
+			{"/", c0},
+		}
+
+		for idx, result := range results {
+			require.Equal(t, result.path, expected[idx].path)
+			require.Equal(t, result.commit, expected[idx].commit)
+		}
+	})
+}
+
+func TestAtomic(t *testing.T) {
+	WithDummyLinker(t, func(lkr *Linker) {
+		err := lkr.Atomic(func() (bool, error) {
+			MustTouch(t, lkr, "/x", 1)
+			return false, nil
+		})
+
+		require.Nil(t, err)
+
+		err = lkr.Atomic(func() (bool, error) {
+			MustTouch(t, lkr, "/y", 1)
+			return true, errors.New("artificial error")
+		})
+
+		require.NotNil(t, err)
+
+		err = lkr.Atomic(func() (bool, error) {
+			MustTouch(t, lkr, "/z", 1)
+			panic("woah")
+		})
+
+		require.NotNil(t, err)
+
+		x, err := lkr.LookupFile("/x")
+		require.Nil(t, err)
+		require.Equal(t, x.Path(), "/x")
+
+		_, err = lkr.LookupFile("/y")
+		require.NotNil(t, err)
+		require.True(t, ie.IsNoSuchFileError(err))
+
+		_, err = lkr.LookupFile("/z")
+		require.NotNil(t, err)
+		require.True(t, ie.IsNoSuchFileError(err))
+	})
+}
+
+func TestCommitByIndex(t *testing.T) {
+	// Note: WithReloadingLinker creates an init commit.
+	WithDummyLinker(t, func(lkr *Linker) {
+		head, err := lkr.Head()
+		require.Nil(t, err)
+		require.Equal(t, head.Index(), int64(0))
+
+		status, err := lkr.Status()
+		require.Nil(t, err)
+		require.Equal(t, int64(1), status.Index())
+
+		// Must modify something to commit:
+		MustTouch(t, lkr, "/x", 1)
+
+		require.Nil(t, lkr.MakeCommit("fanwb", "is awesome"))
+		newHead, err := lkr.Head()
+		require.Nil(t, err)
+		require.Equal(t, int64(1), newHead.Index())
+
+		status, err = lkr.Status()
+		require.Nil(t, err)
+		require.Equal(t, int64(2), status.Index())
+
+		// Lookup the just created commits:
+
+		// Pre-existing init commit:
+		c1, err := lkr.CommitByIndex(0)
+		require.Nil(t, err)
+		require.Equal(t, "init", c1.Message())
+
+		// Our commit:
+		c2, err := lkr.CommitByIndex(1)
+		require.Nil(t, err)
+		require.Equal(t, "is awesome", c2.Message())
+
+		// Same as the status commit:
+		c3, err := lkr.CommitByIndex(2)
+		require.Nil(t, err)
+		require.NotNil(t, c3)
+		require.Equal(t, status.TreeHash(), c3.TreeHash())
+
+		// Not existing:
+		c4, err := lkr.CommitByIndex(3)
+		require.Nil(t, err)
+		require.Nil(t, c4)
+	})
+}
+
+func TestLookupNodeAt(t *testing.T) {
+	WithDummyLinker(t, func(lkr *Linker) {
+		fmt.Println("start")
+		for idx := byte(0); idx < 10; idx++ {
+			MustTouchAndCommit(t, lkr, "/x", idx)
+		}
+		fmt.Println("done")
+
+		for idx := 0; idx < 10; idx++ {
+			// commit index of 0 is init, so + 1
+			cmt, err := lkr.CommitByIndex(int64(idx + 1))
+			require.Nil(t, err)
+
+			nd, err := lkr.LookupNodeAt(cmt, "/x")
+			require.Nil(t, err)
+			require.Equal(t, nd.ContentHash(), h.TestDummy(t, byte(idx)))
+		}
+
+		// Init should not exist:
+		init, err := lkr.CommitByIndex(0)
+		require.Nil(t, err)
+
+		nd, err := lkr.LookupNodeAt(init, "/x")
+		require.Nil(t, nd)
+		require.True(t, ie.IsNoSuchFileError(err))
+
+		// Stage should have the last change:
+		stage, err := lkr.CommitByIndex(11)
+		require.Nil(t, err)
+
+		stageNd, err := lkr.LookupNodeAt(stage, "/x")
+		require.Nil(t, err)
+		require.Equal(t, stageNd.ContentHash(), h.TestDummy(t, 9))
+
+		// quick check to see if the next commit is really empty
+		// (tests only the test setup)
+		last, err := lkr.CommitByIndex(12)
+		require.Nil(t, err)
+		require.Nil(t, last)
 	})
 }
