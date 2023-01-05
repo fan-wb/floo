@@ -403,3 +403,60 @@ func (ch *Change) FromCapnp(msg *capnp.Message) error {
 
 	return ch.fromCapnpChange(capCh)
 }
+
+// CombineChanges compresses a list of changes (in a lossy way) to one Change.
+// The one change should be enough to re-create the changes that were made.
+func CombineChanges(changes []*Change) *Change {
+	if len(changes) == 0 {
+		return nil
+	}
+
+	// Only take the latest changes:
+	ch := &Change{
+		Mask: ChangeType(0),
+		Head: changes[0].Head,
+		Next: changes[0].Next,
+		Curr: changes[0].Curr,
+	}
+
+	// If the node moved, save the original path in MovedTo:
+	pathChanged := changes[0].Curr.Path() != changes[len(changes)-1].Curr.Path()
+	isGhost := changes[0].Curr.Type() == n.NodeTypeGhost
+
+	// Combine the mask:
+	for _, change := range changes {
+		ch.Mask |= change.Mask
+	}
+
+	if ch.Mask&ChangeTypeMove != 0 {
+		for idx := len(changes) - 1; idx >= 0; idx-- {
+			if refPath := changes[idx].MovedTo; refPath != "" {
+				ch.MovedTo = refPath
+				break
+			}
+		}
+
+		for idx := len(changes) - 1; idx >= 0; idx-- {
+			if refPath := changes[idx].WasPreviouslyAt; refPath != "" {
+				ch.WasPreviouslyAt = refPath
+				pathChanged = refPath != changes[0].Curr.Path()
+				break
+			}
+		}
+	}
+
+	// If the path did not really change, we do not want to have ChangeTypeMove
+	// in the mask. This is to protect against circular moves.  If it's a ghost
+	// we should still include it though (for WasPreviouslyAt)
+	if !pathChanged && !isGhost {
+		ch.Mask &= ^ChangeTypeMove
+
+	}
+
+	// If the last change was not a remove, we do not need to
+	if changes[0].Mask&ChangeTypeRemove == 0 && !isGhost {
+		ch.Mask &= ^ChangeTypeRemove
+	}
+
+	return ch
+}
