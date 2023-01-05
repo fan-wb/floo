@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	ie "floo/catfs/errors"
 	n "floo/catfs/nodes"
 	h "floo/util/hashlib"
@@ -10,6 +11,11 @@ import (
 	"path"
 	"strings"
 	"time"
+)
+
+var (
+	// ErrIsGhost is returned by Remove() when calling it on a ghost.
+	ErrIsGhost = errors.New("is a ghost")
 )
 
 // mkdirParents takes the dirname of repoPath and makes sure all intermediate
@@ -112,6 +118,143 @@ func Mkdir(lkr *Linker, repoPath string, createParents bool) (dir *n.Directory, 
 	return
 }
 
+// prepareParent tries to figure out the correct parent directory when attempting
+// to move `nd` to `dstPath`. It also removes any nodes that are "in the way" if possible.
+func prepareParent(lkr *Linker, nd n.ModNode, dstPath string) (*n.Directory, error) {
+	// Check if the destination already exists:
+	destNode, err := lkr.LookupModNode(dstPath)
+	if err != nil && !ie.IsNoSuchFileError(err) {
+		return nil, err
+	}
+
+	if destNode == nil {
+		// No node at this place yet, attempt to look it up.
+		return lkr.LookupDirectory(path.Dir(dstPath))
+	}
+
+	switch destNode.Type() {
+	case n.NodeTypeDirectory:
+		// Move inside this directory.
+		// Check if there is already a file
+		destDir, ok := destNode.(*n.Directory)
+		if !ok {
+			return nil, ie.ErrBadNode
+		}
+
+		child, err := destDir.Child(lkr, nd.Name())
+		if err != nil {
+			return nil, err
+		}
+
+		// Oh, something is in there?
+		if child != nil {
+			if nd.Type() == n.NodeTypeFile {
+				return nil, fmt.Errorf(
+					"cannot overwrite a directory (%s) with a file (%s)",
+					destNode.Path(),
+					child.Path(),
+				)
+			}
+
+			childDir, ok := child.(*n.Directory)
+			if !ok {
+				return nil, ie.ErrBadNode
+			}
+
+			if childDir.Size() > 0 {
+				return nil, fmt.Errorf(
+					"cannot move over: %s; directory is not empty",
+					child.Path(),
+				)
+			}
+
+			// Okay, there is an empty directory. Let's remove it to
+			// replace it with our source node.
+			log.Warningf("Remove child dir: %v", childDir)
+			if _, _, err := Remove(lkr, childDir, false, false); err != nil {
+				return nil, err
+			}
+		}
+
+		return destDir, nil
+	case n.NodeTypeFile:
+		log.Infof("Remove file: %v", destNode.Path())
+		parentDir, _, err := Remove(lkr, destNode, false, false)
+		return parentDir, err
+	case n.NodeTypeGhost:
+		// It is already a ghost. Overwrite it and do not create a new one.
+		log.Infof("Remove ghost: %v", destNode.Path())
+		parentDir, _, err := Remove(lkr, destNode, false, true)
+		return parentDir, err
+	default:
+		return nil, ie.ErrBadNode
+	}
+}
+
+// Move moves the node `nd` to the path at `dstPath` and leaves
+// a ghost at the old place.
+func Move(lkr *Linker, nd n.ModNode, dstPath string) error {
+	// Forbid moving a node inside of one of its subdirectories.
+	if nd.Type() == n.NodeTypeGhost {
+		return errors.New("cannot move ghosts")
+	}
+
+	if nd.Path() == dstPath {
+		return fmt.Errorf("Source and Dest are the same file: %v", dstPath)
+	}
+
+	if strings.HasPrefix(path.Dir(dstPath), nd.Path()) {
+		return fmt.Errorf(
+			"Cannot move `%s` into it's own subdir `%s`",
+			nd.Path(),
+			dstPath,
+		)
+	}
+
+	return lkr.Atomic(func() (bool, error) {
+		parentDir, err := prepareParent(lkr, nd, dstPath)
+		if err != nil {
+			return true, err
+		}
+
+		// Remove the old node:
+		oldPath := nd.Path()
+		_, ghost, err := Remove(lkr, nd, true, true)
+		if err != nil {
+			return true, e.Wrapf(err, "remove old")
+		}
+
+		if parentDir.Path() == dstPath {
+			dstPath = path.Join(parentDir.Path(), path.Base(oldPath))
+		}
+
+		// The node needs to be told that its path changed,
+		// since it might need to change its hash value now.
+		if err := nd.NotifyMove(lkr, parentDir, dstPath); err != nil {
+			return true, e.Wrapf(err, "notify move")
+		}
+
+		err = n.Walk(lkr, nd, true, func(child n.Node) error {
+			return e.Wrapf(lkr.StageNode(child), "stage node")
+		})
+
+		if err != nil {
+			return true, err
+		}
+
+		if err := lkr.AddMoveMapping(nd.Inode(), ghost.Inode()); err != nil {
+			return true, e.Wrapf(err, "add move mapping")
+		}
+
+		return false, nil
+	})
+}
+
+// StageFromFileNode is a convenient helper that will call Stage() with all necessary params from `f`.
+func StageFromFileNode(lkr *Linker, f *n.File) (*n.File, error) {
+	return Stage(lkr, f.Path(), f.ContentHash(), f.BackendHash(), f.Size(), f.Key())
+}
+
 // Stage adds a file to floo's DAG.
 func Stage(lkr *Linker, repoPath string, contentHash, backendHash h.Hash, size uint64, key []byte) (file *n.File, err error) {
 	node, lerr := lkr.LookupNode(repoPath)
@@ -202,6 +345,62 @@ func Stage(lkr *Linker, repoPath string, contentHash, backendHash h.Hash, size u
 
 		if err := lkr.StageNode(file); err != nil {
 			return true, err
+		}
+
+		return false, nil
+	})
+
+	return
+}
+
+// Remove removes a single node from a directory.
+// `nd` is the node that shall be removed and may not be root.
+// The parent directory is returned.
+func Remove(lkr *Linker, nd n.ModNode, createGhost, force bool) (parentDir *n.Directory, ghost *n.Ghost, err error) {
+	if !force && nd.Type() == n.NodeTypeGhost {
+		err = ErrIsGhost
+		return
+	}
+
+	parentDir, err = n.ParentDirectory(lkr, nd)
+	if err != nil {
+		return
+	}
+
+	// We shouldn't delete the root directory
+	// (only directory with a parent)
+	if parentDir == nil {
+		err = fmt.Errorf("refusing to delete root")
+		return
+	}
+
+	err = lkr.Atomic(func() (bool, error) {
+		if err := parentDir.RemoveChild(lkr, nd); err != nil {
+			return true, fmt.Errorf("failed to remove child: %v", err)
+		}
+
+		lkr.MemIndexPurge(nd)
+
+		if err := lkr.StageNode(parentDir); err != nil {
+			return true, err
+		}
+
+		if createGhost {
+			newGhost, err := n.MakeGhost(nd, lkr.NextInode())
+			if err != nil {
+				return true, err
+			}
+
+			if err := parentDir.Add(lkr, newGhost); err != nil {
+				return true, err
+			}
+
+			if err := lkr.StageNode(newGhost); err != nil {
+				return true, err
+			}
+
+			ghost = newGhost
+			return false, nil
 		}
 
 		return false, nil

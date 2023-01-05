@@ -1,8 +1,16 @@
 package vcs
 
 import (
+	capnp "capnproto.org/go/capnp/v3"
+	c "floo/catfs/core"
+	ie "floo/catfs/errors"
 	n "floo/catfs/nodes"
+	capnp_model "floo/catfs/nodes/capnp"
+	capnp_patch "floo/catfs/vcs/capnp"
 	"fmt"
+	e "github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
+	"path"
 	"strings"
 )
 
@@ -10,14 +18,14 @@ const (
 	// ChangeTypeNone means that a node did not change (compared to HEAD)
 	ChangeTypeNone = ChangeType(0)
 	// ChangeTypeAdd says that the node was initially added after HEAD.
-	ChangeTypeAdd = ChangeType(1 << iota)
+	ChangeTypeAdd = ChangeType(1 << iota) // 0000 0001
 	// ChangeTypeModify says that the node was modified after HEAD
-	ChangeTypeModify
+	ChangeTypeModify // 0000 0010
 	// ChangeTypeMove says that the node was moved after HEAD.
 	// Note that Move and Modify may happen at the same time.
-	ChangeTypeMove
+	ChangeTypeMove // 0000 0100
 	// ChangeTypeRemove says that the node was removed after HEAD.
-	ChangeTypeRemove
+	ChangeTypeRemove // 0000 1000
 )
 
 // ChangeType is a mask of possible state change events.
@@ -95,4 +103,303 @@ func (ch *Change) String() string {
 	}
 
 	return fmt.Sprintf("<%s:%s%s%s>", ch.Curr.Path(), ch.Mask, prevAt, movedTo)
+}
+
+func replayAddWithUnpacking(lkr *c.Linker, ch *Change) error {
+	// If it's a ghost, unpack it first: It will be added as if it was
+	// never a ghost, but since the change mask has the
+	// ChangeTypeRemove flag set, it will get removed directly after.
+	currNd := ch.Curr
+	if ch.Curr.Type() == n.NodeTypeGhost {
+		currGhost, ok := ch.Curr.(*n.Ghost)
+		if !ok {
+			return ie.ErrBadNode
+		}
+		currNd = currGhost.OldNode()
+	}
+
+	// Check the type of the old node:
+	oldNd, err := lkr.LookupModNode(currNd.Path())
+	if err != nil && !ie.IsNoSuchFileError(err) {
+		return err
+	}
+	// If the types are conflicting we have to remove the existing node.
+	if oldNd != nil && oldNd.Type() != currNd.Type() {
+		_, _, err := c.Remove(lkr, oldNd, true, true)
+		if err != nil {
+			return e.Wrapf(err, "replay: type-conflict-remove")
+		}
+	}
+
+	return replayAdd(lkr, currNd)
+}
+
+func replayAdd(lkr *c.Linker, currNd n.ModNode) error {
+	switch currNd.(type) {
+	case *n.File:
+		if _, err := c.Mkdir(lkr, path.Dir(currNd.Path()), true); err != nil {
+			return e.Wrapf(err, "replay: mkdir")
+		}
+
+		if _, err := c.StageFromFileNode(lkr, currNd.(*n.File)); err != nil {
+			return e.Wrapf(err, "replay: stage")
+		}
+	case *n.Directory:
+		if _, err := c.Mkdir(lkr, currNd.Path(), true); err != nil {
+			return e.Wrapf(err, "replay: mkdir")
+		}
+	default:
+		return e.Wrapf(ie.ErrBadNode, "replay: modify")
+	}
+
+	return nil
+}
+
+func replayAddMoveMapping(lkr *c.Linker, oldPath, newPath string) error {
+	newNd, err := lkr.LookupModNode(newPath)
+	if err != nil {
+		return err
+	}
+
+	oldNd, err := lkr.LookupModNode(oldPath)
+	if err != nil && !ie.IsNoSuchFileError(err) {
+		return nil
+	}
+
+	if oldNd == nil {
+		return nil
+	}
+
+	log.Debugf("adding move mapping: %s %s", oldPath, newPath)
+	return lkr.AddMoveMapping(oldNd.Inode(), newNd.Inode())
+}
+
+func replayMove(lkr *c.Linker, ch *Change) error {
+	if ch.MovedTo != "" {
+		oldNd, err := lkr.LookupModNode(ch.Curr.Path())
+		if err != nil && !ie.IsNoSuchFileError(err) {
+			return err
+		}
+
+		if _, err := c.Mkdir(lkr, path.Dir(ch.MovedTo), true); err != nil {
+			return e.Wrapf(err, "replay: mkdir")
+		}
+
+		if oldNd != nil {
+			if err := c.Move(lkr, oldNd, ch.MovedTo); err != nil {
+				return e.Wrapf(err, "replay: move")
+			}
+		}
+	}
+
+	if ch.Curr.Type() != n.NodeTypeGhost {
+		if _, err := lkr.LookupModNode(ch.Curr.Path()); ie.IsNoSuchFileError(err) {
+			if err := replayAdd(lkr, ch.Curr); err != nil {
+				return err
+			}
+		}
+	}
+
+	if ch.WasPreviouslyAt != "" {
+		oldNd, err := lkr.LookupModNode(ch.WasPreviouslyAt)
+		if err != nil && !ie.IsNoSuchFileError(err) {
+			return err
+		}
+
+		if oldNd != nil {
+			if oldNd.Type() != n.NodeTypeGhost {
+				if _, _, err := c.Remove(lkr, oldNd, true, true); err != nil {
+					return e.Wrap(err, "replay: move: remove old")
+				}
+			}
+		}
+
+		if err := replayAddMoveMapping(lkr, ch.WasPreviouslyAt, ch.Curr.Path()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func replayRemove(lkr *c.Linker, ch *Change) error {
+	currNd, err := lkr.LookupModNode(ch.Curr.Path())
+	if err != nil {
+		return e.Wrapf(err, "replay: lookup: %v", ch.Curr.Path())
+	}
+
+	if currNd.Type() != n.NodeTypeGhost {
+		if _, _, err := c.Remove(lkr, currNd, true, true); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Replay applies the change `ch` onto `lkr` by redoing the same operations:
+// move, remove, modify, add. Commits are not replayed, everything happens in
+// lkr.Status() without creating a new commit.
+func (ch *Change) Replay(lkr *c.Linker) error {
+	return lkr.Atomic(func() (bool, error) {
+		if ch.Mask&(ChangeTypeModify|ChangeTypeAdd) != 0 {
+			// Something needs to be done based on the type.
+			// Either create/update a new file or create a directory.
+			if err := replayAddWithUnpacking(lkr, ch); err != nil {
+				return true, err
+			}
+		}
+
+		if ch.Mask&ChangeTypeMove != 0 {
+			if err := replayMove(lkr, ch); err != nil {
+				return true, err
+			}
+		}
+
+		// We should only remove a node if we're getting a ghost in ch.Curr.
+		// Otherwise, the node might have been removed and added again.
+		if ch.Mask&ChangeTypeRemove != 0 && ch.Curr.Type() == n.NodeTypeGhost {
+			if err := replayRemove(lkr, ch); err != nil {
+				return true, err
+			}
+		}
+
+		return false, nil
+	})
+}
+
+// ToCapnp converts a change to a capnproto message.
+func (ch *Change) ToCapnp() (*capnp.Message, error) {
+	msg, seg, err := capnp.NewMessage(capnp.SingleSegment(nil))
+	if err != nil {
+		return nil, err
+	}
+
+	capCh, err := capnp_patch.NewRootChange(seg)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := ch.toCapnpChange(seg, &capCh); err != nil {
+		return nil, err
+	}
+
+	return msg, nil
+}
+
+func (ch *Change) toCapnpChange(seg *capnp.Segment, capCh *capnp_patch.Change) error {
+	capCurrNd, err := capnp_model.NewNode(seg)
+	if err != nil {
+		return err
+	}
+
+	if err := ch.Curr.ToCapnpNode(seg, capCurrNd); err != nil {
+		return err
+	}
+
+	capHeadNd, err := capnp_model.NewNode(seg)
+	if err != nil {
+		return err
+	}
+
+	if err := ch.Head.ToCapnpNode(seg, capHeadNd); err != nil {
+		return err
+	}
+
+	capNextNd, err := capnp_model.NewNode(seg)
+	if err != nil {
+		return err
+	}
+
+	if err := ch.Next.ToCapnpNode(seg, capNextNd); err != nil {
+		return err
+	}
+
+	if err := capCh.SetCurr(capCurrNd); err != nil {
+		return err
+	}
+
+	if err := capCh.SetHead(capHeadNd); err != nil {
+		return err
+	}
+
+	if err := capCh.SetNext(capNextNd); err != nil {
+		return err
+	}
+
+	if err := capCh.SetMovedTo(ch.MovedTo); err != nil {
+		return err
+	}
+
+	if err := capCh.SetWasPreviouslyAt(ch.WasPreviouslyAt); err != nil {
+		return err
+	}
+
+	capCh.SetMask(uint64(ch.Mask))
+	return nil
+
+}
+
+func (ch *Change) fromCapnpChange(capCh capnp_patch.Change) error {
+	capHeadNd, err := capCh.Head()
+	if err != nil {
+		return err
+	}
+
+	ch.Head = &n.Commit{}
+	if err := ch.Head.FromCapnpNode(capHeadNd); err != nil {
+		return err
+	}
+
+	capNextNd, err := capCh.Next()
+	if err != nil {
+		return err
+	}
+
+	ch.Next = &n.Commit{}
+	if err := ch.Next.FromCapnpNode(capNextNd); err != nil {
+		return err
+	}
+
+	capCurrNd, err := capCh.Curr()
+	if err != nil {
+		return err
+	}
+
+	currNd, err := n.CapNodeToNode(capCurrNd)
+	if err != nil {
+		return err
+	}
+
+	currModNd, ok := currNd.(n.ModNode)
+	if !ok {
+		return e.Wrapf(ie.ErrBadNode, "unmarshalled node is no mod node")
+	}
+
+	ch.Curr = currModNd
+
+	movedTo, err := capCh.MovedTo()
+	if err != nil {
+		return err
+	}
+
+	wasPreviouslyAt, err := capCh.WasPreviouslyAt()
+	if err != nil {
+		return err
+	}
+
+	ch.MovedTo = movedTo
+	ch.WasPreviouslyAt = wasPreviouslyAt
+	ch.Mask = ChangeType(capCh.Mask())
+	return nil
+}
+
+// FromCapnp deserializes `msg` and writes it to `ch`.
+func (ch *Change) FromCapnp(msg *capnp.Message) error {
+	capCh, err := capnp_patch.ReadRootChange(msg)
+	if err != nil {
+		return err
+	}
+
+	return ch.fromCapnpChange(capCh)
 }
