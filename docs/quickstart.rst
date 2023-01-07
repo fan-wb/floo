@@ -13,17 +13,8 @@ This does not really explain the philosophy behind ``floo``, but gives a good
 idea what the tool is able to do and how it's supposed to be used. Users
 familiar to ``git`` should be able to grok most of the commands intuitively.
 
-1. Init
--------
 
-Before you can do anything with ``floo`` you need to create a repository.
-During this step, also your online identity will be created.
-.. raw:: html
-
-    <script src="https://asciinema.org/a/163713.js" id="asciicast-163713" async></script>
-
-
-2. Adding files
+1. Adding files
 ---------------
 
 Before synchronizing them, you need to *stage* them. The files will be stored
@@ -34,7 +25,7 @@ encrypted (and possibly compressed) in blobs on your hard disks.
     <script id="asciicast-ZUnAzK1qdvvgjsmiL2VmmPEzX" src="https://asciinema.org/a/ZUnAzK1qdvvgjsmiL2VmmPEzX.js" async></script>
 
 
-3. Coreutils
+2. Coreutils
 ------------
 
 ``floo`` provides implementations of most file related core utils like ``mv``,
@@ -43,9 +34,9 @@ familiar for users that know the command line.
 
 .. raw:: html
 
-    <script src="https://asciinema.org/a/swIw29Qkml0A44H1MgKQvOQ8L.js" id="asciicast-swIw29Qkml0A44H1MgKQvOQ8L" async></script>
+    <script id="asciicast-pTdBvvgtM5p9b9MENRuNzMQga" src="https://asciinema.org/a/pTdBvvgtM5p9b9MENRuNzMQga.js" async></script>
 
-4. Mounting
+3. Mounting
 -----------
 
 For daily use and for use with other tools you might prefer a folder that
@@ -54,7 +45,7 @@ layer.
 
 .. raw:: html
 
-    <script src="https://asciinema.org/a/166178.js" id="asciicast-166178" async></script>
+    <script id="asciicast-D9YOEI77GqbTSgmv5UwGZlucX" src="https://asciinema.org/a/D9YOEI77GqbTSgmv5UwGZlucX.js" async></script>
 
 .. note::
 
@@ -64,7 +55,7 @@ layer.
 If you wish to always have the mount when ``floo`` is running, you should look
 into :ref:`permanent-mounts`.
 
-5. Commits
+4. Commits
 ----------
 
 In it's heart, ``floo`` is very similar to ``git`` and also supports versioning
@@ -73,55 +64,5 @@ can't go back in history -- you can only bring the history back up front.
 
 .. raw:: html
 
-    <script src="https://asciinema.org/a/166180.js" id="asciicast-166180" async></script>
+   <script id="asciicast-4omRS5anJthenxWnpdLLxwNTv" src="https://asciinema.org/a/4omRS5anJthenxWnpdLLxwNTv.js" async></script>
 
-6. History
-----------
-
-Each file (and directory) maintains a history of the operations that were done
-to this file.
-
-
-.. raw:: html
-
-    <script src="https://asciinema.org/a/166181.js" id="asciicast-166181" async></script>
-
-7. Discovery & Remotes
-----------------------
-
-In order to sync with your buddies, you need to add their *fingerprint* as remotes.
-How do you get their fingerprint? In the best case by using a separate side channel
-like telephone, encrypted email or elsewhise. But ``floo`` can assist finding remotes
-via the ``floo net locate`` command.
-
-.. raw:: html
-
-    <script src="https://asciinema.org/a/166182.js" id="asciicast-166182" async></script>
-
-.. note::
-
-    You should **always** verify the fingerprint is really the one of your buddy.
-    ``floo`` cannot do this for you.
-
-8. Sync & Diff
---------------
-
-Once both parties have setup each other as remotes, we can easily view and sync
-with their data.
-
-.. raw:: html
-
-    <script src="https://asciinema.org/a/166183.js" id="asciicast-166183" async></script>
-
-9. Pinning
-----------
-
-By default ``floo`` will only keep the most recent files. All other files will
-be marked to deletions after a certain timeframe. This is done via *Pins*. If
-a file is pinned, it won't get deleted. If you don't need a file in local
-storage, you can also unpin it. On the next access ``floo`` will try to load it
-again from a peer that provides it (if possible).
-
-.. raw:: html
-
-    <script src="https://asciinema.org/a/176590.js" id="asciicast-176590" async></script>
